@@ -126,10 +126,9 @@ tr.row-green td { background: var(--row-green); }
     <div id="emptyState" class="empty">
       <h2>Load the Oil_Lube_Dip_Tracker.xlsx to begin</h2>
       <ol>
-        <li>Fill in the <b>Dips</b> sheet each weekday morning and save.</li>
+        <li>Fill in each weekday's dips in the tracker and save.</li>
         <li>Click <b>Load Dip Tracker</b> and choose the file.</li>
-        <li>Optionally click <b>Load GL Flex</b> with the depot's GL Flex export to overlay issues &amp; goods in<br>
-          <span class="muted">(or paste it into the tracker's GL Flex sheet — it's picked up automatically).</span></li>
+        <li>Click <b>Load GL Flex</b> and choose the depot's GL Flex export to pull in issues &amp; goods in.</li>
       </ol>
     </div>
 
@@ -173,36 +172,57 @@ function readWorkbook(file) {
 }
 const rowsOf = ws => XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null, blankrows: true });
 
-function parseTracker(wb) {
-  const ps = wb.Sheets['Parts'], ds = wb.Sheets['Dips'];
-  if (!ds) throw new Error('No "Dips" sheet found — is this the Oil & Lube Dip Tracker?');
-  const pRows = ps ? rowsOf(ps).slice(1).filter(r => r[0] != null) : [];
-  const pInfo = {};
-  pRows.forEach(r => pInfo[normPart(r[0])] = { desc: r[1], uom: r[2], container: r[3], fall: num(r[4]), rise: num(r[5]), tol: num(r[6]) });
+/* Alert levels (litres between dips). fall/rise = sharp movement, tol = allowed mismatch vs GL Flex.
+   Starting guide values — edit here once normal daily usage is known. */
+const ALERTS = {
+  '100000': { container: 'Bulk tank', fall: 15000, rise: 5000, tol: 1000 },
+  '207427': { container: 'Bulk tank', fall: 300, rise: 300, tol: 50 },
+  '207429': { container: '208L drum', fall: 150, rise: 150, tol: 20 },
+  '207419': { container: 'Bulk tank', fall: 200, rise: 200, tol: 30 },
+  '207384': { container: 'Bulk tank', fall: 500, rise: 500, tol: 75 },
+  '274889': { container: 'IBC', fall: 300, rise: 300, tol: 50 },
+  '213285': { container: '1000L IBC', fall: 300, rise: 300, tol: 50 },
+  '222636': { container: '208L drum', fall: 100, rise: 100, tol: 20 },
+  '241877': { container: 'Container', fall: 10, rise: 10, tol: 2 },
+  '256374': { container: '1000L IBC', fall: 300, rise: 300, tol: 50 },
+  '264210': { container: '208L drum', fall: 150, rise: 150, tol: 20 },
+  '264552': { container: '208L drum', fall: 150, rise: 150, tol: 20 },
+};
+function guessAlerts(desc) {
+  const d = String(desc).toUpperCase();
+  if (d.includes('DIESEL') || d.includes('FUEL')) return { container: 'Bulk tank', fall: 15000, rise: 5000, tol: 1000 };
+  if (d.includes('BULK')) return { container: 'Bulk tank', fall: 300, rise: 300, tol: 50 };
+  if (d.includes('IBC') || d.includes('1000L')) return { container: 'IBC', fall: 300, rise: 300, tol: 50 };
+  if (d.includes('208L')) return { container: '208L drum', fall: 150, rise: 150, tol: 20 };
+  return { container: '', fall: 50, rise: 50, tol: 10 };
+}
 
-  const rows = rowsOf(ds);
+/* Tracker layout: one sheet, A = Part, B = PartDesc, C onwards = weekday dates across the top */
+function parseTracker(wb) {
+  const name = wb.SheetNames.includes('Dips') ? 'Dips' : wb.SheetNames[0];
+  const rows = rowsOf(wb.Sheets[name]);
   const head = rows[0] || [];
-  const parts = [];
-  for (let c = 2; c < head.length; c++) {
-    if (head[c] == null || head[c] === '') continue;
-    const pn = normPart(head[c]); const i = pInfo[pn] || {};
-    parts.push({ col: c, part: pn, desc: i.desc || rows[1]?.[c] || pn, uom: i.uom || 'L', container: i.container || '',
-      fall: i.fall ?? 100, rise: i.rise ?? 100, tol: i.tol ?? 20 });
+  if (String(head[0] ?? '').trim().toLowerCase() !== 'part')
+    throw new Error('Expected "Part" in A1 with dates across row 1 — is this the Oil & Lube Dip Tracker?');
+  const dateCols = [];
+  for (let c = 2; c < head.length; c++) { const iso = toISO(head[c]); if (iso) dateCols.push({ c, iso }); }
+  dateCols.sort((x, y) => x.iso < y.iso ? -1 : 1);
+  const parts = [], dips = [];
+  for (let r = 1; r < rows.length; r++) {
+    const row = rows[r] || [];
+    const pn = normPart(row[0]);
+    if (!pn || !/\d/.test(pn) || pn.length > 20) continue;   // skip notes / blank rows
+    const desc = row[1] ?? pn;
+    const al = ALERTS[pn] || guessAlerts(desc);
+    parts.push({ part: pn, desc, uom: /\(LTS\)/i.test(desc) ? 'LTS' : 'L', ...al });
+    dips.push(dateCols.map(d => num(row[d.c])));
   }
-  const dates = [], dips = parts.map(() => []);
-  for (let r = 2; r < rows.length; r++) {
-    const iso = toISO(rows[r][0]); if (!iso) continue;
-    dates.push(iso);
-    parts.forEach((p, k) => dips[k].push(num(rows[r][p.col])));
-  }
+  if (!parts.length) throw new Error('No part numbers found in column A.');
   // trim trailing future dates with no dips at all
   let last = -1;
-  dates.forEach((_, i) => { if (dips.some(a => a[i] != null)) last = i; });
+  dateCols.forEach((_, i) => { if (dips.some(a => a[i] != null)) last = i; });
   const n = last + 1;
-  S.parts = parts; S.dates = dates.slice(0, n); S.dips = dips.map(a => a.slice(0, n));
-  // embedded GL Flex sheet (if the user pasted it into the tracker)
-  const g = wb.Sheets['GL Flex'];
-  if (g && !S.glExternal && typeof parseGL === 'function') { const gr = rowsOf(g); if (gr.length > 1) parseGL(gr, 'tracker GL Flex sheet'); }
+  S.parts = parts; S.dates = dateCols.slice(0, n).map(d => d.iso); S.dips = dips.map(a => a.slice(0, n));
 }
 
 /* Per-part derived series: change since last recorded dip, flags */
@@ -541,7 +561,7 @@ function deriveGL() {
 }
 
 function glSetupHTML() {
-  if (!S.gl) return `<div class="panel"><h2>GL Flex <span class="sub">Load the depot's GL Flex export (or paste it into the tracker's GL Flex sheet) to compare dips with booked issues &amp; goods in.</span></h2></div>`;
+  if (!S.gl) return `<div class="panel"><h2>GL Flex <span class="sub">Load the depot's GL Flex export to compare dips with booked issues &amp; goods in.</span></h2></div>`;
   const types = Object.keys(S.typeMap).sort();
   const counts = {}; S.gl.forEach(t => counts[t.type] = (counts[t.type] || 0) + 1);
   const plants = [...new Set(S.gl.map(t => t.plant).filter(Boolean))].sort();
