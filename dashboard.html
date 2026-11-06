@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Oil &amp; Lube Dips</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+:root {
+  --bg-page:       #f5f5f7;
+  --bg-header:     #2D2A6E;
+  --bg-panel:      #ffffff;
+  --accent:        #E5007D;
+  --accent-hover:  #C0006A;
+  --row-red:       rgba(231,76,60,0.12);
+  --row-amber:     rgba(243,156,18,0.15);
+  --row-green:     rgba(39,174,96,0.15);
+  --text-primary:  #2D2A6E;
+  --text-secondary:#6b6b8a;
+  --text-on-dark:  #ffffff;
+  --border:        #e0e0ec;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg-page); color: var(--text-primary);
+  font-family: system-ui, -apple-system, "Segoe UI", Arial, sans-serif; font-size: 13px; }
+header { background: var(--bg-header); color: var(--text-on-dark); padding: 0 20px; min-height: 56px;
+  display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
+header h1 { font-size: 17px; margin: 0; font-weight: 600; }
+.tagline { font-size: 10px; opacity: 0.55; letter-spacing: 0.05em; margin-top: 2px; }
+.header-actions { margin-left: auto; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 8px 0; }
+.upload-btn { background: var(--accent); color: #fff; border: none; border-radius: 5px; padding: 7px 14px;
+  font-size: 13px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+.upload-btn:hover { background: var(--accent-hover); }
+.upload-btn input { display: none; }
+.file-status { font-size: 11px; opacity: 0.8; }
+.toggle-btn { background: none; border: 1px solid var(--accent); color: var(--accent); border-radius: 5px;
+  padding: 4px 12px; font-size: 12px; cursor: pointer; }
+.toggle-btn:hover { background: rgba(229,0,125,0.08); }
+.toggle-btn.active { background: var(--accent); color: #fff; }
+.action-btn { background: #27ae60; color: #fff; border: none; border-radius: 5px; padding: 4px 12px; font-size: 12px; cursor: pointer; }
+.action-btn:hover { background: #219a52; }
+
+.layout { display: grid; grid-template-columns: 270px 1fr; min-height: calc(100vh - 56px); }
+aside { background: var(--bg-panel); border-right: 1px solid var(--border); padding: 12px 0; }
+aside h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-secondary);
+  margin: 6px 14px 8px; }
+.nav-item { display: flex; justify-content: space-between; align-items: center; padding: 7px 14px; cursor: pointer;
+  font-size: 13px; border-radius: 0 20px 20px 0; margin-right: 8px; transition: background 0.15s; gap: 8px; }
+.nav-item:hover { background: rgba(229,0,125,0.08); }
+.nav-item.active { background: var(--accent); color: #fff; }
+.nav-item .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nav-item .pn { font-size: 11px; opacity: .7; display: block; }
+.nav-item.active .badge-navy { background: #fff; color: var(--accent); }
+.badge-navy { background: #2D2A6E; color: #fff; border-radius: 3px; padding: 1px 5px; font-size: 11px; white-space: nowrap; }
+.badge-red  { background: #e74c3c; color: #fff; border-radius: 3px; padding: 1px 5px; font-size: 11px; white-space: nowrap; }
+.badge-green{ background: #27ae60; color: #fff; border-radius: 3px; padding: 1px 5px; font-size: 11px; white-space: nowrap; }
+.badges { display: flex; gap: 3px; flex-shrink: 0; }
+
+main { padding: 18px 20px 40px; min-width: 0; }
+.panel { background: var(--bg-panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; margin-bottom: 16px; }
+.panel h2 { font-size: 14px; margin: 0 0 10px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.panel h2 .sub { font-weight: 400; color: var(--text-secondary); font-size: 12px; }
+.panel h2 .right { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.tile { background: var(--bg-panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
+.tile .lbl { font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: .04em; }
+.tile .val { font-size: 22px; font-weight: 600; margin-top: 4px; font-variant-numeric: tabular-nums; }
+.tile .val.red { color: #c0392b; } .tile .val.green { color: #27ae60; }
+.tile .hint { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
+
+.table-wrap { overflow-x: auto; }
+.wo-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.wo-table th { background: var(--bg-header); color: var(--text-on-dark); padding: 8px 10px; text-align: left; font-size: 12px; white-space: nowrap; }
+.wo-table td { padding: 7px 10px; border-bottom: 1px solid #eaecef; white-space: nowrap; }
+.wo-table td.num, .wo-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.wo-table tbody tr:hover td { filter: brightness(0.96); }
+.wo-table tr.clickable { cursor: pointer; }
+tr.row-red td   { background: var(--row-red); }
+tr.row-amber td { background: var(--row-amber); }
+tr.row-green td { background: var(--row-green); }
+.t-red { color: #c0392b; font-weight: 600; } .t-green { color: #27ae60; font-weight: 600; }
+.muted { color: var(--text-secondary); }
+
+.empty { text-align: center; padding: 60px 20px; color: var(--text-secondary); }
+.empty h2 { color: var(--text-primary); font-size: 18px; }
+.empty ol { text-align: left; display: inline-block; line-height: 1.8; }
+.hidden { display: none !important; }
+.chart-box { position: relative; height: 340px; }
+
+@media (max-width: 800px) {
+  .layout { grid-template-columns: 1fr; }
+  aside { border-right: none; border-bottom: 1px solid var(--border); max-height: 260px; overflow-y: auto; }
+  main { padding: 14px 16px 30px; }
+  header { padding: 0 16px; }
+}
+@media print {
+  header .header-actions, aside { display: none; }
+  .layout { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>🛢️ Oil &amp; Lube Dip Dashboard</h1>
+    <div class="tagline">Designed by First Bus Franchise · Engineering</div>
+  </div>
+  <div class="header-actions">
+    <span class="file-status" id="trackerStatus">No tracker loaded</span>
+    <label class="upload-btn">📂 Load Dip Tracker<input type="file" id="trackerFile" accept=".xlsx,.xlsm,.xls"></label>
+    <span class="file-status" id="glStatus"></span>
+    <label class="upload-btn">📑 Load GL Flex<input type="file" id="glFile" accept=".xlsx,.xls,.csv"></label>
+  </div>
+</header>
+
+<div class="layout">
+  <aside>
+    <h3>View</h3>
+    <div class="nav-item active" data-part="__all"><span class="nm">📊 All parts overview</span></div>
+    <h3 style="margin-top:14px">Parts</h3>
+    <div id="partNav"><div class="muted" style="padding:4px 14px">Load the tracker to list parts.</div></div>
+  </aside>
+
+  <main>
+    <div id="emptyState" class="empty">
+      <h2>Load the Oil_Lube_Dip_Tracker.xlsx to begin</h2>
+      <ol>
+        <li>Fill in the <b>Dips</b> sheet each weekday morning and save.</li>
+        <li>Click <b>Load Dip Tracker</b> and choose the file.</li>
+        <li>Optionally click <b>Load GL Flex</b> with the depot's GL Flex export to overlay issues &amp; goods in<br>
+          <span class="muted">(or paste it into the tracker's GL Flex sheet — it's picked up automatically).</span></li>
+      </ol>
+    </div>
+
+    <div id="dash" class="hidden">
+      <div class="tiles" id="tiles"></div>
+      <div id="views"></div>
+    </div>
+  </main>
+</div>
+
+<script>
+/* ===================== STAGE 1 — data loading & overview ===================== */
+const S = { parts: [], dates: [], dips: [], gl: null, glMap: null, sel: '__all', trackerName: '', charts: [] };
+const DAY = 864e5;
+const fmt = (n, sign) => n == null || isNaN(n) ? '–' :
+  (sign && n > 0 ? '+' : '') + Math.round(n).toLocaleString('en-GB');
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+// Excel serial / Date / "dd/mm/yyyy" -> "yyyy-mm-dd" (local day, timezone-safe)
+function toISO(v) {
+  if (v == null || v === '') return null;
+  if (typeof v === 'number') {
+    const d = new Date(Math.round((v - 25569) * DAY));
+    return d.toISOString().slice(0, 10);
+  }
+  if (v instanceof Date) return new Date(Date.UTC(v.getFullYear(), v.getMonth(), v.getDate())).toISOString().slice(0, 10);
+  const s = String(v).trim();
+  let m = s.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})/);
+  if (m) { const y = m[3].length === 2 ? '20' + m[3] : m[3]; return `${y}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`; }
+  m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? `${m[1]}-${m[2]}-${m[3]}` : null;
+}
+const dLabel = iso => { const d = new Date(iso + 'T00:00:00Z');
+  return d.toLocaleDateString('en-GB', { weekday: 'short', day: '2-digit', month: '2-digit', timeZone: 'UTC' }); };
+const dLong = iso => new Date(iso + 'T00:00:00Z').toLocaleDateString('en-GB', { weekday: 'short', day: '2-digit', month: 'short', year: 'numeric', timeZone: 'UTC' });
+const num = v => { if (v == null || v === '') return null; const n = typeof v === 'number' ? v : parseFloat(String(v).replace(/,/g, '')); return isNaN(n) ? null : n; };
+const normPart = v => String(v ?? '').trim().replace(/\.0+$/, '').toUpperCase();
+
+function readWorkbook(file) {
+  return file.arrayBuffer().then(buf => XLSX.read(buf, { type: 'array', cellDates: false }));
+}
+const rowsOf = ws => XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null, blankrows: false });
+
+function parseTracker(wb) {
+  const ps = wb.Sheets['Parts'], ds = wb.Sheets['Dips'];
+  if (!ds) throw new Error('No "Dips" sheet found — is this the Oil & Lube Dip Tracker?');
+  const pRows = ps ? rowsOf(ps).slice(1).filter(r => r[0] != null) : [];
+  const pInfo = {};
+  pRows.forEach(r => pInfo[normPart(r[0])] = { desc: r[1], uom: r[2], container: r[3], fall: num(r[4]), rise: num(r[5]), tol: num(r[6]) });
+
+  const rows = rowsOf(ds);
+  const head = rows[0] || [];
+  const parts = [];
+  for (let c = 2; c < head.length; c++) {
+    if (head[c] == null || head[c] === '') continue;
+    const pn = normPart(head[c]); const i = pInfo[pn] || {};
+    parts.push({ col: c, part: pn, desc: i.desc || rows[1]?.[c] || pn, uom: i.uom || 'L', container: i.container || '',
+      fall: i.fall ?? 100, rise: i.rise ?? 100, tol: i.tol ?? 20 });
+  }
+  const dates = [], dips = parts.map(() => []);
+  for (let r = 2; r < rows.length; r++) {
+    const iso = toISO(rows[r][0]); if (!iso) continue;
+    dates.push(iso);
+    parts.forEach((p, k) => dips[k].push(num(rows[r][p.col])));
+  }
+  // trim trailing future dates with no dips at all
+  let last = -1;
+  dates.forEach((_, i) => { if (dips.some(a => a[i] != null)) last = i; });
+  const n = last + 1;
+  S.parts = parts; S.dates = dates.slice(0, n); S.dips = dips.map(a => a.slice(0, n));
+  // embedded GL Flex sheet (if the user pasted it into the tracker)
+  const g = wb.Sheets['GL Flex'];
+  if (g && !S.glExternal && typeof parseGL === 'function') { const gr = rowsOf(g); if (gr.length > 1) parseGL(gr, 'tracker GL Flex sheet'); }
+}
+
+/* Per-part derived series: change since last recorded dip, flags */
+function derive() {
+  S.parts.forEach((p, k) => {
+    const v = S.dips[k];
+    p.change = v.map(() => null); p.prevIdx = v.map(() => null);
+    let lastI = null;
+    v.forEach((x, i) => {
+      if (x == null) return;
+      if (lastI != null) { p.change[i] = x - v[lastI]; p.prevIdx[i] = lastI; }
+      lastI = i;
+    });
+    p.lastIdx = lastI;
+    p.flags = p.change.map(c => c == null ? null : c <= -p.fall ? 'fall' : c >= p.rise ? 'rise' : null);
+    p.nFall = p.flags.filter(f => f === 'fall').length;
+    p.nRise = p.flags.filter(f => f === 'rise').length;
+    const ch = p.change.filter(c => c != null);
+    const falls = ch.filter(c => c < 0).map(c => -c);
+    p.avgUse = falls.length ? falls.reduce((a, b) => a + b, 0) / falls.length : null;
+  });
+  if (typeof deriveGL === 'function') deriveGL();
+}
+
+function renderNav() {
+  const nav = document.getElementById('partNav');
+  nav.innerHTML = S.parts.map(p => `
+    <div class="nav-item ${S.sel === p.part ? 'active' : ''}" data-part="${esc(p.part)}" title="${esc(p.desc)}">
+      <span class="nm"><span class="pn">${esc(p.part)}</span>${esc(p.desc)}</span>
+      <span class="badges">
+        ${p.nFall ? `<span class="badge-red" title="Sharp falls">▼${p.nFall}</span>` : ''}
+        ${p.nRise ? `<span class="badge-green" title="Sharp rises">▲${p.nRise}</span>` : ''}
+        ${p.nVar ? `<span class="badge-navy" title="Unexplained variances">⚠${p.nVar}</span>` : ''}
+      </span>
+    </div>`).join('');
+  document.querySelectorAll('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.part === S.sel));
+}
+
+function renderTiles() {
+  const t = document.getElementById('tiles');
+  const nDates = S.dates.length;
+  const lastD = nDates ? S.dates[nDates - 1] : null;
+  const falls = S.parts.reduce((a, p) => a + p.nFall, 0), rises = S.parts.reduce((a, p) => a + p.nRise, 0);
+  const todayFalls = lastD ? S.parts.filter(p => p.flags[nDates - 1] === 'fall').length : 0;
+  const missed = lastD ? S.parts.filter(p => S.dips[S.parts.indexOf(p)][nDates - 1] == null).length : 0;
+  const nVar = S.parts.reduce((a, p) => a + (p.nVar || 0), 0);
+  t.innerHTML = `
+    <div class="tile"><div class="lbl">Latest dip day</div><div class="val" style="font-size:17px">${lastD ? dLong(lastD) : '–'}</div><div class="hint">${nDates} weekday${nDates === 1 ? '' : 's'} recorded</div></div>
+    <div class="tile"><div class="lbl">Sharp falls</div><div class="val ${falls ? 'red' : ''}">${falls}</div><div class="hint">${todayFalls} on latest day</div></div>
+    <div class="tile"><div class="lbl">Sharp rises</div><div class="val ${rises ? 'green' : ''}">${rises}</div><div class="hint">deliveries / top-ups</div></div>
+    <div class="tile"><div class="lbl">Not dipped (latest)</div><div class="val ${missed ? 'red' : ''}">${missed}</div><div class="hint">of ${S.parts.length} parts</div></div>
+    <div class="tile"><div class="lbl">GL variances</div><div class="val ${nVar ? 'red' : ''}">${S.glMap ? nVar : '–'}</div><div class="hint">${S.glMap ? 'beyond tolerance' : 'load GL Flex'}</div></div>`;
+}
+
+function overviewHTML() {
+  const n = S.dates.length;
+  return `<div class="panel"><h2>All parts — latest position <span class="sub">Click a row to drill in. Row colour = latest movement.</span></h2>
+  <div class="table-wrap"><table class="wo-table"><thead><tr>
+    <th>Part</th><th>Description</th><th class="num">Last dip</th><th>Dipped</th><th class="num">Change</th>
+    <th class="num">Avg fall/day</th><th class="num">Fall alert</th><th class="num">▼ Falls</th><th class="num">▲ Rises</th>
+    ${S.glMap ? '<th class="num">Issues</th><th class="num">Goods in</th><th class="num">Net variance</th>' : ''}
+  </tr></thead><tbody>
+  ${S.parts.map((p, k) => {
+    const li = p.lastIdx, v = li != null ? S.dips[k][li] : null, c = li != null ? p.change[li] : null;
+    const stale = li != null && li < n - 1;
+    const cls = li == null ? '' : p.flags[li] === 'fall' ? 'row-red' : p.flags[li] === 'rise' ? 'row-green' : stale ? 'row-amber' : '';
+    return `<tr class="clickable ${cls}" data-goto="${esc(p.part)}">
+      <td><span class="badge-navy">${esc(p.part)}</span></td><td>${esc(p.desc)}</td>
+      <td class="num">${fmt(v)} <span class="muted">${esc(p.uom)}</span></td>
+      <td>${li != null ? dLabel(S.dates[li]) : '–'}${stale ? ' <span class="t-red">(stale)</span>' : ''}</td>
+      <td class="num ${c < 0 ? 't-red' : c > 0 ? 't-green' : ''}">${fmt(c, true)}</td>
+      <td class="num">${fmt(p.avgUse)}</td><td class="num muted">${fmt(p.fall)}</td>
+      <td class="num">${p.nFall ? `<span class="badge-red">${p.nFall}</span>` : '0'}</td>
+      <td class="num">${p.nRise ? `<span class="badge-green">${p.nRise}</span>` : '0'}</td>
+      ${S.glMap ? `<td class="num">${fmt(p.totIss)}</td><td class="num">${fmt(p.totGI)}</td>
+        <td class="num ${p.totVar < -p.tol ? 't-red' : ''}">${fmt(p.totVar, true)}</td>` : ''}
+    </tr>`; }).join('')}
+  </tbody></table></div></div>`;
+}
+
+function render() {
+  if (!S.parts.length) return;
+  document.getElementById('emptyState').classList.add('hidden');
+  document.getElementById('dash').classList.remove('hidden');
+  S.charts.forEach(c => c.destroy()); S.charts = [];
+  renderNav(); renderTiles();
+  const views = document.getElementById('views');
+  if (S.sel === '__all') {
+    views.innerHTML = overviewHTML() + (typeof overviewChartsHTML === 'function' ? overviewChartsHTML() : '');
+    if (typeof drawOverviewCharts === 'function') drawOverviewCharts();
+  } else {
+    const k = S.parts.findIndex(p => p.part === S.sel);
+    views.innerHTML = typeof partHTML === 'function' ? partHTML(k) : '<div class="panel">Part view coming in stage 2.</div>';
+    if (typeof drawPart === 'function') drawPart(k);
+  }
+  views.querySelectorAll('[data-goto]').forEach(el => el.onclick = () => select(el.dataset.goto));
+  if (typeof afterRender === 'function') afterRender();
+}
+function select(part) { S.sel = part; render(); window.scrollTo({ top: 0, behavior: 'smooth' }); }
+
+document.querySelector('aside').addEventListener('click', e => {
+  const it = e.target.closest('.nav-item'); if (it) select(it.dataset.part);
+});
+document.getElementById('trackerFile').addEventListener('change', async e => {
+  const f = e.target.files[0]; if (!f) return;
+  const st = document.getElementById('trackerStatus');
+  try {
+    parseTracker(await readWorkbook(f)); S.trackerName = f.name;
+    derive(); render();
+    st.textContent = `✔ ${f.name}`;
+  } catch (err) { st.textContent = '✖ ' + err.message; alert(err.message); }
+  e.target.value = '';
+});
+</script>
+</body>
+</html>
