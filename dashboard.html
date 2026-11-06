@@ -86,6 +86,10 @@ tr.row-green td { background: var(--row-green); }
 .empty h2 { color: var(--text-primary); font-size: 18px; }
 .empty ol { text-align: left; display: inline-block; line-height: 1.8; }
 .hidden { display: none !important; }
+.statusbar { background: #24215a; color: rgba(255,255,255,.6); font-size: 11px; padding: 5px 20px; display: flex; gap: 22px; flex-wrap: wrap; }
+.statusbar .ok { color: #fff; }
+.legend-line { display:inline-block; width:18px; height:0; border-top:2px solid; vertical-align:middle; margin-right:4px; }
+.settings select, .settings input { font-size: 12px; padding: 3px 4px; border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary); }
 .chart-box { position: relative; height: 340px; }
 
 @media (max-width: 800px) {
@@ -107,31 +111,33 @@ tr.row-green td { background: var(--row-green); }
     <div class="tagline">Designed by First Bus Franchise · Engineering</div>
   </div>
   <div class="header-actions">
-    <span class="file-status" id="trackerStatus">No tracker loaded</span>
-    <label class="upload-btn">📂 Load Dip Tracker<input type="file" id="trackerFile" accept=".xlsx,.xlsm,.xls"></label>
-    <span class="file-status" id="glStatus"></span>
-    <label class="upload-btn">📑 Load GL Flex<input type="file" id="glFile" accept=".xlsx,.xls,.csv"></label>
+    <label class="upload-btn">📂 Dip Tracker<input type="file" id="trackerFile" accept=".xlsx,.xlsm,.xls"></label>
+    <label class="upload-btn">📑 GL Flex<input type="file" id="glFile" accept=".xlsx,.xls,.csv"></label>
+    <label class="upload-btn">📦 Stock on Hand<input type="file" id="sohFile" accept=".xlsx,.xls,.csv"></label>
   </div>
 </header>
+<div class="statusbar" id="statusBar">
+  <span id="trackerStatus">Dip tracker: not loaded</span><span id="glStatus">GL Flex: not loaded</span><span id="sohStatus">Stock on hand: not loaded</span>
+</div>
 
 <div class="layout">
   <aside>
     <h3>View</h3>
     <div class="nav-item active" data-part="__all"><span class="nm">📊 All parts overview</span></div>
     <h3 style="margin-top:14px">Parts</h3>
-    <div id="partNav"><div class="muted" style="padding:4px 14px">Load the tracker to list parts.</div></div>
+    <div id="partNav"></div>
   </aside>
 
   <main>
     <div id="emptyState" class="empty">
-      <h2>Load the Oil_Lube_Dip_Tracker.xlsx to begin</h2>
+      <h2>Load your files to begin</h2>
       <ol>
-        <li>Fill in each weekday's dips in the tracker and save.</li>
-        <li>Click <b>Load Dip Tracker</b> and choose the file.</li>
-        <li>Click <b>Load GL Flex</b> and choose the depot's GL Flex export to pull in issues &amp; goods in.</li>
+        <li><b>Dip Tracker</b>: the Oil_Lube_Dip_Tracker.xlsx with each weekday's dips.</li>
+        <li><b>GL Flex</b>: the depot's GL Flex export, which gives issues, goods in and stock takes.</li>
+        <li><b>Stock on Hand</b>: the stock on hand report, which gives the system stock line to compare with the dips.</li>
       </ol>
+      <p class="muted">Any one file is enough to start. Load all three for the full picture.</p>
     </div>
-
     <div id="dash" class="hidden">
       <div class="tiles" id="tiles"></div>
       <div id="views"></div>
@@ -140,506 +146,499 @@ tr.row-green td { background: var(--row-green); }
 </div>
 
 <script>
-/* ===================== STAGE 1 — data loading & overview ===================== */
-const S = { parts: [], dates: [], dips: [], gl: null, glMap: null, sel: '__all', trackerName: '', charts: [] };
-const DAY = 864e5;
-const fmt = (n, sign) => n == null || isNaN(n) ? '–' :
-  (sign && n > 0 ? '+' : '') + Math.round(n).toLocaleString('en-GB');
-const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+/* ===================== STAGE 1 — data model & loaders ===================== */
+/* Tracked parts and alert levels (litres).
+   fall = minimum sharp-fall alert (raised automatically to 1.5× normal GL usage for the period),
+   rise = sharp-rise alert, tol = allowed mismatch between dip change and GL Flex. Edit here if needed. */
+const PARTS = [
+  { part: '100000', desc: 'Fuel Diesel Ultra Low Sulphur (L)', container: 'Bulk tank', fall: 15000, rise: 5000, tol: 1000 },
+  { part: '207427', desc: 'Oil Transmission BULK (L)', container: 'Bulk tank', fall: 100, rise: 300, tol: 50 },
+  { part: '207429', desc: 'Oil Transmission 208L (L)', container: '208L drum', fall: 50, rise: 150, tol: 20 },
+  { part: '207419', desc: 'Oil Axle 85W-140 BULK (L)', container: 'Bulk tank', fall: 75, rise: 200, tol: 30 },
+  { part: '207384', desc: 'Oil Engine 10W-30 BULK (L)', container: 'Bulk tank', fall: 150, rise: 500, tol: 75 },
+  { part: '274889', desc: 'Coolant Antifreeze Green Euro 6 IBC (L)', container: 'IBC', fall: 150, rise: 300, tol: 50 },
+  { part: '213285', desc: 'Coolant Antifreeze Standard Red 50:50 1000L IBC (L)', container: '1000L IBC', fall: 300, rise: 300, tol: 50 },
+  { part: '222636', desc: 'Oil Axle 85W-140 208L (L)', container: '208L drum', fall: 50, rise: 100, tol: 20 },
+  { part: '241877', desc: 'Oil Compressor Hydrovane Fluidforce QCIM (L)', container: 'Container', fall: 10, rise: 10, tol: 2 },
+  { part: '256374', desc: 'Fluid Screenwash Premium 1000L (LTS)', container: '1000L IBC', fall: 300, rise: 300, tol: 50 },
+  { part: '264210', desc: 'Oil Transmission 208L (L)', container: '208L drum', fall: 100, rise: 150, tol: 20 },
+  { part: '264552', desc: 'Oil Engine 5W-30 208L (L)', container: '208L drum', fall: 100, rise: 150, tol: 20 },
+];
+/* GL Flex TransactionType meaning. Sign: positive TransactionQty = stock out, negative = stock in. */
+const TYPE_DEFAULTS = { I: 'issue', RECV: 'gi', RREC: 'gi', RETN: 'gi', STTK: 'sttk' };
+const TYPE_LABEL = { issue: 'Issue', gi: 'Goods in / return', sttk: 'Stock take adj.', ignore: 'Ignore' };
 
-// Excel serial / Date / "dd/mm/yyyy" -> "yyyy-mm-dd" (local day, timezone-safe)
+const S = { tracker: null, gl: null, soh: null, sohAsAt: null, typeMap: {}, sel: '__all', range: '65', alertsOnly: false, charts: [], M: null };
+const DAY = 864e5;
+const fmt = (n, sign) => n == null || isNaN(n) ? '–' : (sign && Math.round(n) > 0 ? '+' : '') + Math.round(n).toLocaleString('en-GB');
+const gbp = n => n == null || isNaN(n) ? '–' : (n < 0 ? '−' : '') + '£' + Math.abs(Math.round(n)).toLocaleString('en-GB');
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const num = v => { if (v == null || v === '') return null; const n = typeof v === 'number' ? v : parseFloat(String(v).replace(/[,£]/g, '')); return isNaN(n) ? null : n; };
+const normPart = v => String(v ?? '').trim().replace(/\.0+$/, '').toUpperCase();
 function toISO(v) {
   if (v == null || v === '') return null;
-  if (typeof v === 'number') {
-    const d = new Date(Math.round((v - 25569) * DAY));
-    return d.toISOString().slice(0, 10);
-  }
+  if (typeof v === 'number') return v > 20000 && v < 80000 ? new Date(Math.round((Math.floor(v) - 25569) * DAY)).toISOString().slice(0, 10) : null;
   if (v instanceof Date) return new Date(Date.UTC(v.getFullYear(), v.getMonth(), v.getDate())).toISOString().slice(0, 10);
   const s = String(v).trim();
-  let m = s.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})/);
+  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})/); if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+  m = s.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})/);
   if (m) { const y = m[3].length === 2 ? '20' + m[3] : m[3]; return `${y}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`; }
-  m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  return m ? `${m[1]}-${m[2]}-${m[3]}` : null;
+  return null;
 }
-const dLabel = iso => { const d = new Date(iso + 'T00:00:00Z');
-  return d.toLocaleDateString('en-GB', { weekday: 'short', day: '2-digit', month: '2-digit', timeZone: 'UTC' }); };
+const isoMs = iso => Date.parse(iso + 'T00:00:00Z');
+const dLabel = iso => new Date(iso + 'T00:00:00Z').toLocaleDateString('en-GB', { weekday: 'short', day: '2-digit', month: '2-digit', timeZone: 'UTC' });
 const dLong = iso => new Date(iso + 'T00:00:00Z').toLocaleDateString('en-GB', { weekday: 'short', day: '2-digit', month: 'short', year: 'numeric', timeZone: 'UTC' });
-const num = v => { if (v == null || v === '') return null; const n = typeof v === 'number' ? v : parseFloat(String(v).replace(/,/g, '')); return isNaN(n) ? null : n; };
-const normPart = v => String(v ?? '').trim().replace(/\.0+$/, '').toUpperCase();
+/* Weekday index: Saturday & Sunday map onto the following Monday (that's where weekend activity lands for a Monday dip). */
+const EPOCH_MON = Date.UTC(1970, 0, 5);
+function wd(iso) { const d = Math.round((isoMs(iso) - EPOCH_MON) / DAY), w = Math.floor(d / 7), r = d - w * 7; return w * 5 + Math.min(r, 5); }
+function wdISO(w) { const wk = Math.floor(w / 5), r = w - wk * 5; return new Date(EPOCH_MON + (wk * 7 + r) * DAY).toISOString().slice(0, 10); }
 
-function readWorkbook(file) {
-  return file.arrayBuffer().then(buf => XLSX.read(buf, { type: 'array', cellDates: false }));
-}
+const readWorkbook = file => file.arrayBuffer().then(buf => XLSX.read(buf, { type: 'array', cellDates: false, dense: true }));
 const rowsOf = ws => XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null, blankrows: true });
-
-/* Alert levels (litres between dips). fall/rise = sharp movement, tol = allowed mismatch vs GL Flex.
-   Starting guide values — edit here once normal daily usage is known. */
-const ALERTS = {
-  '100000': { container: 'Bulk tank', fall: 15000, rise: 5000, tol: 1000 },
-  '207427': { container: 'Bulk tank', fall: 300, rise: 300, tol: 50 },
-  '207429': { container: '208L drum', fall: 150, rise: 150, tol: 20 },
-  '207419': { container: 'Bulk tank', fall: 200, rise: 200, tol: 30 },
-  '207384': { container: 'Bulk tank', fall: 500, rise: 500, tol: 75 },
-  '274889': { container: 'IBC', fall: 300, rise: 300, tol: 50 },
-  '213285': { container: '1000L IBC', fall: 300, rise: 300, tol: 50 },
-  '222636': { container: '208L drum', fall: 100, rise: 100, tol: 20 },
-  '241877': { container: 'Container', fall: 10, rise: 10, tol: 2 },
-  '256374': { container: '1000L IBC', fall: 300, rise: 300, tol: 50 },
-  '264210': { container: '208L drum', fall: 150, rise: 150, tol: 20 },
-  '264552': { container: '208L drum', fall: 150, rise: 150, tol: 20 },
-};
-function guessAlerts(desc) {
-  const d = String(desc).toUpperCase();
-  if (d.includes('DIESEL') || d.includes('FUEL')) return { container: 'Bulk tank', fall: 15000, rise: 5000, tol: 1000 };
-  if (d.includes('BULK')) return { container: 'Bulk tank', fall: 300, rise: 300, tol: 50 };
-  if (d.includes('IBC') || d.includes('1000L')) return { container: 'IBC', fall: 300, rise: 300, tol: 50 };
-  if (d.includes('208L')) return { container: '208L drum', fall: 150, rise: 150, tol: 20 };
-  return { container: '', fall: 50, rise: 50, tol: 10 };
-}
-
-/* Tracker layout: one sheet, A = Part, B = PartDesc, C onwards = weekday dates across the top */
-function parseTracker(wb) {
-  const name = wb.SheetNames.includes('Dips') ? 'Dips' : wb.SheetNames[0];
-  const rows = rowsOf(wb.Sheets[name]);
-  const head = rows[0] || [];
-  if (String(head[0] ?? '').trim().toLowerCase() !== 'part')
-    throw new Error('Expected "Part" in A1 with dates across row 1 — is this the Oil & Lube Dip Tracker?');
-  const dateCols = [];
-  for (let c = 2; c < head.length; c++) { const iso = toISO(head[c]); if (iso) dateCols.push({ c, iso }); }
-  dateCols.sort((x, y) => x.iso < y.iso ? -1 : 1);
-  const parts = [], dips = [];
-  for (let r = 1; r < rows.length; r++) {
-    const row = rows[r] || [];
-    const pn = normPart(row[0]);
-    if (!pn || !/\d/.test(pn) || pn.length > 20) continue;   // skip notes / blank rows
-    const desc = row[1] ?? pn;
-    const al = ALERTS[pn] || guessAlerts(desc);
-    parts.push({ part: pn, desc, uom: /\(LTS\)/i.test(desc) ? 'LTS' : 'L', ...al });
-    dips.push(dateCols.map(d => num(row[d.c])));
+function findHeader(rows, key) {
+  for (let r = 0; r < Math.min(rows.length, 15); r++) {
+    const h = (rows[r] || []).map(c => String(c ?? '').trim().toLowerCase());
+    if (h.includes(key)) return { r, h };
   }
-  if (!parts.length) throw new Error('No part numbers found in column A.');
-  // trim trailing future dates with no dips at all
-  let last = -1;
-  dateCols.forEach((_, i) => { if (dips.some(a => a[i] != null)) last = i; });
-  const n = last + 1;
-  S.parts = parts; S.dates = dateCols.slice(0, n).map(d => d.iso); S.dips = dips.map(a => a.slice(0, n));
+  return null;
+}
+const sheetWith = (wb, key) => wb.SheetNames.find(n => findHeader(rowsOf(wb.Sheets[n]).slice(0, 15), key)) || wb.SheetNames[0];
+
+/* Dip tracker: A = Part, B = PartDesc, row 1 = weekday dates across */
+function parseTracker(wb, fname) {
+  const name = wb.SheetNames.includes('Dips') ? 'Dips' : wb.SheetNames[0];
+  const rows = rowsOf(wb.Sheets[name]), head = rows[0] || [];
+  if (String(head[0] ?? '').trim().toLowerCase() !== 'part') throw new Error('Dip tracker: expected "Part" in A1 with dates across row 1.');
+  const cols = [];
+  for (let c = 2; c < head.length; c++) { const iso = toISO(head[c]); if (iso) cols.push({ c, iso }); }
+  const t = { parts: {}, order: [], file: fname, n: 0, last: null };
+  for (let r = 1; r < rows.length; r++) {
+    const row = rows[r] || [], pn = normPart(row[0]);
+    if (!pn || !/\d/.test(pn) || pn.length > 20) continue;
+    const vals = {};
+    cols.forEach(({ c, iso }) => { const v = num(row[c]); if (v != null) { vals[iso] = v; t.n++; if (!t.last || iso > t.last) t.last = iso; } });
+    t.parts[pn] = { desc: row[1], vals }; t.order.push(pn);
+  }
+  if (!t.order.length) throw new Error('Dip tracker: no part numbers found in column A.');
+  S.tracker = t;
+  setStatus('trackerStatus', `Dip tracker ✔ ${fname}: ${t.n} dips${t.last ? ', latest ' + dLabel(t.last) : ''}`);
 }
 
-/* Per-part derived series: change since last recorded dip, flags */
-function derive() {
-  S.parts.forEach((p, k) => {
-    const v = S.dips[k];
-    p.change = v.map(() => null); p.prevIdx = v.map(() => null);
-    let lastI = null;
-    v.forEach((x, i) => {
-      if (x == null) return;
-      if (lastI != null) { p.change[i] = x - v[lastI]; p.prevIdx[i] = lastI; }
-      lastI = i;
-    });
-    p.lastIdx = lastI;
-    p.flags = p.change.map(c => c == null ? null : c <= -p.fall ? 'fall' : c >= p.rise ? 'rise' : null);
-    p.nFall = p.flags.filter(f => f === 'fall').length;
-    p.nRise = p.flags.filter(f => f === 'rise').length;
-    const ch = p.change.filter(c => c != null);
-    const falls = ch.filter(c => c < 0).map(c => -c);
-    p.avgUse = falls.length ? falls.reduce((a, b) => a + b, 0) / falls.length : null;
-  });
-  if (typeof deriveGL === 'function') deriveGL();
+/* GL Flex export (standard 33 columns; matched by header name) */
+function parseGL(wb, fname) {
+  const rows = rowsOf(wb.Sheets[sheetWith(wb, 'transactiontype')]);
+  const f = findHeader(rows, 'transactiontype'); if (!f) throw new Error('GL Flex: no TransactionType header found.');
+  const ix = k => f.h.indexOf(k.toLowerCase());
+  const C = { type: ix('TransactionType'), date: ix('PostingDate'), no: ix('TransactionNumber'), qty: ix('TransactionQty'), val: ix('TransactionValue'),
+    part: ix('Part'), fleet: ix('FleetNumber'), wo: ix('WorkOrder'), who: ix('Originator'), po: ix('PO'), from: ix('FromCode'), to: ix('ToCode') };
+  if (C.part < 0 || C.qty < 0 || C.date < 0) throw new Error('GL Flex: Part, TransactionQty or PostingDate column missing.');
+  const tx = [];
+  for (let r = f.r + 1; r < rows.length; r++) {
+    const row = rows[r]; if (!row) continue;
+    const part = normPart(row[C.part]), iso = toISO(row[C.date]), qty = num(row[C.qty]);
+    if (!part || !iso || qty == null) continue;
+    tx.push({ type: String(row[C.type] ?? '').trim().toUpperCase(), iso, qty, part, val: num(row[C.val]), no: row[C.no] ?? '',
+      fleet: row[C.fleet] ?? '', wo: row[C.wo] ?? '', who: row[C.who] ?? '', po: row[C.po] ?? '', from: row[C.from] ?? '', to: row[C.to] ?? '' });
+  }
+  S.gl = { tx, file: fname };
+  [...new Set(tx.map(t => t.type))].forEach(t => { if (!(t in S.typeMap)) S.typeMap[t] = TYPE_DEFAULTS[t] || 'ignore'; });
+  const ds = tx.map(t => t.iso).sort();
+  setStatus('glStatus', `GL Flex ✔ ${fname}: ${tx.length.toLocaleString('en-GB')} lines, ${dLabel(ds[0])} – ${dLabel(ds[ds.length - 1])}`);
+  if (S.soh && !S.sohAsAtUser && !S.sohAsAtFromName) S.sohAsAt = ds[ds.length - 1];
 }
+
+/* Stock on hand report: Part, Qty, AvgPrice, StockValue, Date of Last Stock Take */
+function parseSOH(wb, fname) {
+  const rows = rowsOf(wb.Sheets[sheetWith(wb, 'qty')]);
+  const f = findHeader(rows, 'qty'); if (!f) throw new Error('Stock on hand: no Qty header found.');
+  const ix = k => f.h.indexOf(k.toLowerCase());
+  const C = { part: ix('Part'), qty: ix('Qty'), price: ix('AvgPrice'), value: ix('StockValue'), st: ix('Date of Last Stock Take'), bin: ix('Bin'), desc: ix('PartDesc') };
+  const soh = {};
+  for (let r = f.r + 1; r < rows.length; r++) {
+    const row = rows[r]; if (!row) continue;
+    const pn = normPart(row[C.part]); if (!pn) continue;
+    const q = num(row[C.qty]); if (q == null) continue;
+    const e = soh[pn] ||= { qty: 0, value: 0, price: null, st: null, bin: [], desc: row[C.desc] };
+    e.qty += q; e.value += num(row[C.value]) || 0; e.price = num(row[C.price]) ?? e.price;
+    const st = toISO(row[C.st]); if (st && (!e.st || st > e.st)) e.st = st;
+    if (row[C.bin]) e.bin.push(row[C.bin]);
+  }
+  S.soh = { parts: soh, file: fname };
+  const m = fname.match(/(\d{4}-\d{2}-\d{2})T/);   // report exports are stamped with their run time
+  S.sohAsAtFromName = !!m;
+  S.sohAsAt = m ? m[1] : (S.gl ? S.gl.tx.map(t => t.iso).sort().pop() : new Date().toISOString().slice(0, 10));
+  setStatus('sohStatus', `Stock on hand ✔ ${fname}: as at ${dLabel(S.sohAsAt)}`);
+}
+function setStatus(id, text) { document.getElementById(id).textContent = text; document.getElementById(id).classList.add('ok'); }
+
+/* ---------- build the model: one row per weekday, per part ---------- */
+function build() {
+  const t = S.tracker, gl = S.gl, soh = S.soh;
+  const parts = PARTS.map(p => ({ ...p }));
+  if (t) t.order.forEach(pn => {
+    if (!parts.some(p => p.part === pn)) parts.push({ part: pn, desc: t.parts[pn].desc || pn, container: '', fall: 50, rise: 50, tol: 10 });
+  });
+  parts.forEach(p => { p.uom = /\(LTS\)/i.test(p.desc) ? 'LTS' : 'L'; });
+  const tracked = new Map(parts.map((p, k) => [p.part, k]));
+
+  // timeline bounds
+  let lo = null, hi = null;
+  const see = iso => { if (!iso) return; if (!lo || iso < lo) lo = iso; if (!hi || iso > hi) hi = iso; };
+  if (t) Object.values(t.parts).forEach(x => Object.keys(x.vals).forEach(see));
+  if (gl) gl.tx.forEach(x => tracked.has(x.part) && see(x.iso));
+  if (soh) see(S.sohAsAt);
+  if (!lo) return null;
+  const w0 = wd(lo), n = wd(hi) - w0 + 1;
+  const dates = Array.from({ length: n }, (_, k) => wdISO(w0 + k));
+  const K = iso => Math.min(n - 1, Math.max(0, wd(iso) - w0));
+  const z = () => new Array(n).fill(0), nul = () => new Array(n).fill(null);
+
+  parts.forEach(p => {
+    p.dip = nul(); p.iss = z(); p.gi = z(); p.adj = z(); p.tx = []; p.book = null;
+    const tp = t && t.parts[p.part];
+    if (tp) Object.entries(tp.vals).forEach(([iso, v]) => { p.dip[K(iso)] = v; });
+  });
+  let glLo = null, glHi = null;
+  if (gl) {
+    gl.tx.forEach(x => {
+      const k = tracked.get(x.part); if (k == null) return;
+      const m = S.typeMap[x.type]; if (!m || m === 'ignore') return;
+      const p = parts[k], i = K(x.iso);
+      x.k = i; p.tx.push(x);
+      if (m === 'issue') p.iss[i] += x.qty; else if (m === 'gi') p.gi[i] -= x.qty; else p.adj[i] -= x.qty;
+    });
+    const all = gl.tx.map(x => x.iso).sort(); glLo = K(all[0]); glHi = K(all[all.length - 1]);
+  }
+  const asAtK = soh ? K(S.sohAsAt) : null;
+
+  parts.forEach(p => {
+    p.tx.sort((a, b) => a.iso < b.iso ? 1 : a.iso > b.iso ? -1 : 0);
+    // system (book) stock: anchor on stock-on-hand qty, walk GL movements backwards/forwards
+    const s = soh && soh.parts[p.part];
+    p.soh = s || null;
+    p.price = s && s.price != null ? s.price : (() => { const v = p.tx.find(x => x.val && x.qty); return v ? Math.abs(v.val / v.qty) : null; })();
+    if (s) {
+      const cum = []; let c = 0;
+      for (let i = 0; i < n; i++) { c += p.gi[i] - p.iss[i] + p.adj[i]; cum.push(c); }
+      p.book = cum.map(v => s.qty + v - cum[asAtK]);
+    }
+    // normal usage by weekday (Mon includes the weekend) from GL issue history
+    p.useDow = [0, 0, 0, 0, 0];
+    if (gl) {
+      const sum = [0, 0, 0, 0, 0], cnt = [0, 0, 0, 0, 0];
+      for (let i = glLo; i <= glHi; i++) { const d = (w0 + i) % 5; sum[d] += p.iss[i]; cnt[d]++; }
+      p.useDow = sum.map((v, d) => cnt[d] ? Math.max(0, v / cnt[d]) : 0);
+    }
+    p.usePerDay = gl ? p.useDow.reduce((a, b) => a + b, 0) / 7 : null;   // per calendar day
+
+    // dip periods
+    p.change = nul(); p.prev = nul(); p.pIss = nul(); p.pGi = nul(); p.pAdj = nul(); p.exp = nul(); p.vr = nul();
+    p.lim = nul(); p.flag = nul(); p.vflag = nul(); p.diff = nul();
+    let last = null; p.nFall = p.nRise = p.nVar = 0; p.totVar = 0; p.totLoss = 0; p.lastIdx = null;
+    for (let i = 0; i < n; i++) {
+      if (p.book && p.dip[i] != null) p.diff[i] = p.dip[i] - p.book[i];
+      if (p.dip[i] == null) continue;
+      if (last != null) {
+        let is = 0, g = 0, a = 0, use = 0;
+        for (let j = last + 1; j <= i; j++) { is += p.iss[j]; g += p.gi[j]; a += p.adj[j]; use += p.useDow[(w0 + j) % 5]; }
+        const ch = p.dip[i] - p.dip[last];
+        p.change[i] = ch; p.prev[i] = last;
+        p.lim[i] = Math.max(p.fall, 1.5 * use);
+        p.flag[i] = ch <= -p.lim[i] ? 'fall' : ch >= p.rise ? 'rise' : null;
+        if (p.flag[i] === 'fall') p.nFall++; if (p.flag[i] === 'rise') p.nRise++;
+        const covered = gl && i >= glLo && last >= glLo - 1 && i <= glHi;
+        if (covered) {
+          p.pIss[i] = is; p.pGi[i] = g; p.pAdj[i] = a; p.exp[i] = g - is; p.vr[i] = ch - (g - is);
+          p.vflag[i] = p.vr[i] <= -p.tol ? 'loss' : p.vr[i] >= p.tol ? 'gain' : null;
+          if (p.vflag[i]) p.nVar++;
+          p.totVar += p.vr[i]; if (p.vr[i] < 0 && p.vflag[i]) p.totLoss += p.vr[i];
+        }
+      }
+      last = i;
+    }
+    p.lastIdx = last;
+  });
+  return { parts, dates, n, w0, glLo, glHi, asAtK };
+}
+</script>
+<script>
+/* ===================== STAGE 2 — overview, settings, loaders ===================== */
+const C = { navy: '#2D2A6E', pink: '#E5007D', red: '#e74c3c', green: '#27ae60', amber: '#e67e22', grid: '#e0e0ec', muted: '#6b6b8a' };
+Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
+Chart.defaults.color = C.muted;
+const ptColor = f => f === 'fall' ? C.red : f === 'rise' ? C.green : C.navy;
+function rangeStart() { const n = S.M.n; return S.range === 'all' ? 0 : Math.max(0, n - +S.range); }
+const rangeButtons = () => `<span class="right">${[['20', '4 wks'], ['65', '13 wks'], ['all', 'All']].map(([v, l]) =>
+  `<button class="toggle-btn ${S.range === v ? 'active' : ''}" data-range="${v}">${l}</button>`).join('')}</span>`;
+const latestDipIdx = () => { let m = null; S.M.parts.forEach(p => { if (p.lastIdx != null && (m == null || p.lastIdx > m)) m = p.lastIdx; }); return m; };
 
 function renderNav() {
-  const nav = document.getElementById('partNav');
-  nav.innerHTML = S.parts.map(p => `
-    <div class="nav-item ${S.sel === p.part ? 'active' : ''}" data-part="${esc(p.part)}" title="${esc(p.desc)}">
+  document.getElementById('partNav').innerHTML = S.M.parts.map(p => `
+    <div class="nav-item" data-part="${esc(p.part)}" title="${esc(p.desc)}">
       <span class="nm"><span class="pn">${esc(p.part)}</span>${esc(p.desc)}</span>
-      <span class="badges">
-        ${p.nFall ? `<span class="badge-red" title="Sharp falls">▼${p.nFall}</span>` : ''}
-        ${p.nRise ? `<span class="badge-green" title="Sharp rises">▲${p.nRise}</span>` : ''}
-        ${p.nVar ? `<span class="badge-navy" title="Unexplained variances">⚠${p.nVar}</span>` : ''}
-      </span>
+      <span class="badges">${p.nFall ? `<span class="badge-red" title="Sharp falls">▼${p.nFall}</span>` : ''}${p.nRise ? `<span class="badge-green" title="Sharp rises">▲${p.nRise}</span>` : ''}${p.nVar ? `<span class="badge-navy" title="Movements GL Flex doesn't explain">⚠${p.nVar}</span>` : ''}</span>
     </div>`).join('');
   document.querySelectorAll('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.part === S.sel));
 }
 
 function renderTiles() {
-  const t = document.getElementById('tiles');
-  const nDates = S.dates.length;
-  const lastD = nDates ? S.dates[nDates - 1] : null;
-  const falls = S.parts.reduce((a, p) => a + p.nFall, 0), rises = S.parts.reduce((a, p) => a + p.nRise, 0);
-  const todayFalls = lastD ? S.parts.filter(p => p.flags[nDates - 1] === 'fall').length : 0;
-  const missed = lastD ? S.parts.filter(p => S.dips[S.parts.indexOf(p)][nDates - 1] == null).length : 0;
-  const nVar = S.parts.reduce((a, p) => a + (p.nVar || 0), 0);
-  t.innerHTML = `
-    <div class="tile"><div class="lbl">Latest dip day</div><div class="val" style="font-size:17px">${lastD ? dLong(lastD) : '–'}</div><div class="hint">${nDates} weekday${nDates === 1 ? '' : 's'} recorded</div></div>
-    <div class="tile"><div class="lbl">Sharp falls</div><div class="val ${falls ? 'red' : ''}">${falls}</div><div class="hint">${todayFalls} on latest day</div></div>
-    <div class="tile"><div class="lbl">Sharp rises</div><div class="val ${rises ? 'green' : ''}">${rises}</div><div class="hint">deliveries / top-ups</div></div>
-    <div class="tile"><div class="lbl">Not dipped (latest)</div><div class="val ${missed ? 'red' : ''}">${missed}</div><div class="hint">of ${S.parts.length} parts</div></div>
-    <div class="tile"><div class="lbl">GL variances</div><div class="val ${nVar ? 'red' : ''}">${S.glMap ? nVar : '–'}</div><div class="hint">${S.glMap ? 'beyond tolerance' : 'load GL Flex'}</div></div>`;
+  const M = S.M, li = latestDipIdx();
+  const falls = M.parts.reduce((a, p) => a + p.nFall, 0), rises = M.parts.reduce((a, p) => a + p.nRise, 0);
+  const nVar = M.parts.reduce((a, p) => a + p.nVar, 0);
+  const lossL = M.parts.reduce((a, p) => a + p.totLoss, 0);
+  const lossV = M.parts.reduce((a, p) => a + (p.price ? p.totLoss * p.price : 0), 0);
+  const val = S.soh ? M.parts.reduce((a, p) => a + (p.soh ? p.soh.value : 0), 0) : null;
+  const offBook = li == null || !S.soh ? null : M.parts.filter(p => p.diff[p.lastIdx] != null && Math.abs(p.diff[p.lastIdx]) >= p.tol).length;
+  document.getElementById('tiles').innerHTML = `
+    <div class="tile"><div class="lbl">Latest dip day</div><div class="val" style="font-size:17px">${li != null ? dLong(M.dates[li]) : '–'}</div><div class="hint">${S.tracker ? S.tracker.n + ' dips recorded' : 'load dip tracker'}</div></div>
+    <div class="tile"><div class="lbl">Sharp falls / rises</div><div class="val"><span class="t-red">${falls}</span> / <span class="t-green">${rises}</span></div><div class="hint">on dips</div></div>
+    <div class="tile"><div class="lbl">Unexplained movements</div><div class="val ${nVar ? 'red' : ''}">${S.gl && S.tracker ? nVar : '–'}</div><div class="hint">${S.gl && S.tracker ? `losses ${fmt(lossL)} L · ${gbp(lossV)}` : 'needs dips + GL Flex'}</div></div>
+    <div class="tile"><div class="lbl">Dip ≠ system stock</div><div class="val ${offBook ? 'red' : ''}">${offBook ?? '–'}</div><div class="hint">${offBook != null ? 'parts outside tolerance at latest dip' : 'needs dips + stock on hand'}</div></div>
+    <div class="tile"><div class="lbl">System stock value</div><div class="val">${val != null ? gbp(val) : '–'}</div><div class="hint">${S.soh ? 'tracked parts, as at ' + dLabel(S.sohAsAt) : 'load stock on hand'}</div></div>`;
 }
 
 function overviewHTML() {
-  const n = S.dates.length;
-  return `<div class="panel"><h2>All parts — latest position <span class="sub">Click a row to drill in. Row colour = latest movement.</span></h2>
-  <div class="table-wrap"><table class="wo-table"><thead><tr>
-    <th>Part</th><th>Description</th><th class="num">Last dip</th><th>Dipped</th><th class="num">Change</th>
-    <th class="num">Avg fall/day</th><th class="num">Fall alert</th><th class="num">▼ Falls</th><th class="num">▲ Rises</th>
-    ${S.glMap ? '<th class="num">Issues</th><th class="num">Goods in</th><th class="num">Net variance</th>' : ''}
-  </tr></thead><tbody>
-  ${S.parts.map((p, k) => {
-    const li = p.lastIdx, v = li != null ? S.dips[k][li] : null, c = li != null ? p.change[li] : null;
-    const stale = li != null && li < n - 1;
-    const cls = li == null ? '' : p.flags[li] === 'fall' ? 'row-red' : p.flags[li] === 'rise' ? 'row-green' : stale ? 'row-amber' : '';
+  const M = S.M, hasDips = !!S.tracker, hasGL = !!S.gl, hasSOH = !!S.soh;
+  const rows = M.parts.map(p => {
+    const li = p.lastIdx, ch = li != null ? p.change[li] : null, df = li != null ? p.diff[li] : null;
+    const stale = li != null && li < latestDipIdx();
+    const cls = li == null ? '' : p.flag[li] === 'fall' || p.vflag[li] === 'loss' ? 'row-red' : p.flag[li] === 'rise' ? 'row-green' : stale ? 'row-amber' : '';
     return `<tr class="clickable ${cls}" data-goto="${esc(p.part)}">
       <td><span class="badge-navy">${esc(p.part)}</span></td><td>${esc(p.desc)}</td>
-      <td class="num">${fmt(v)} <span class="muted">${esc(p.uom)}</span></td>
-      <td>${li != null ? dLabel(S.dates[li]) : '–'}${stale ? ' <span class="t-red">(stale)</span>' : ''}</td>
-      <td class="num ${c < 0 ? 't-red' : c > 0 ? 't-green' : ''}">${fmt(c, true)}</td>
-      <td class="num">${fmt(p.avgUse)}</td><td class="num muted">${fmt(p.fall)}</td>
-      <td class="num">${p.nFall ? `<span class="badge-red">${p.nFall}</span>` : '0'}</td>
-      <td class="num">${p.nRise ? `<span class="badge-green">${p.nRise}</span>` : '0'}</td>
-      ${S.glMap ? `<td class="num">${fmt(p.totIss)}</td><td class="num">${fmt(p.totGI)}</td>
-        <td class="num ${p.totVar < -p.tol ? 't-red' : ''}">${fmt(p.totVar, true)}</td>` : ''}
-    </tr>`; }).join('')}
-  </tbody></table></div></div>`;
+      ${hasSOH ? `<td class="num">${p.soh ? fmt(p.soh.qty) : '–'}</td>` : ''}
+      ${hasDips ? `<td class="num">${fmt(li != null ? p.dip[li] : null)}</td><td>${li != null ? dLabel(M.dates[li]) : '–'}${stale ? ' <span class="t-red">(stale)</span>' : ''}</td>
+        <td class="num ${ch < 0 ? 't-red' : ch > 0 ? 't-green' : ''}">${fmt(ch, true)}</td>` : ''}
+      ${hasDips && hasSOH ? `<td class="num ${df != null && Math.abs(df) >= p.tol ? (df < 0 ? 't-red' : 't-green') : ''}">${fmt(df, true)}</td>` : ''}
+      ${hasGL ? `<td class="num">${fmt(p.usePerDay)}</td>` : ''}
+      ${hasDips ? `<td class="num">${p.nFall ? `<span class="badge-red">${p.nFall}</span>` : '0'}</td><td class="num">${p.nRise ? `<span class="badge-green">${p.nRise}</span>` : '0'}</td>` : ''}
+      ${hasDips && hasGL ? `<td class="num ${p.totVar <= -p.tol ? 't-red' : ''}">${fmt(p.totVar, true)}</td><td class="num ${p.totVar <= -p.tol ? 't-red' : ''}">${p.price ? gbp(p.totVar * p.price) : '–'}</td>` : ''}
+    </tr>`; }).join('');
+  return `<div class="panel"><h2>All parts <span class="sub">Click a row to drill in.</span></h2>
+    <div class="table-wrap"><table class="wo-table"><thead><tr><th>Part</th><th>Description</th>
+      ${hasSOH ? '<th class="num">System stock</th>' : ''}
+      ${hasDips ? '<th class="num">Last dip</th><th>Dipped</th><th class="num">Change</th>' : ''}
+      ${hasDips && hasSOH ? '<th class="num">Dip − system</th>' : ''}
+      ${hasGL ? '<th class="num">Normal use / day</th>' : ''}
+      ${hasDips ? '<th class="num">▼ Falls</th><th class="num">▲ Rises</th>' : ''}
+      ${hasDips && hasGL ? '<th class="num">Net variance L</th><th class="num">Variance £</th>' : ''}
+    </tr></thead><tbody>${rows}</tbody></table></div></div>`
+    + varianceEventsHTML() + miniChartsHTML() + settingsHTML();
 }
 
-function render() {
-  if (!S.parts.length) return;
-  document.getElementById('emptyState').classList.add('hidden');
-  document.getElementById('dash').classList.remove('hidden');
-  S.charts.forEach(c => c.destroy()); S.charts = [];
-  renderNav(); renderTiles();
-  const views = document.getElementById('views');
-  if (S.sel === '__all') {
-    views.innerHTML = overviewHTML() + (typeof overviewChartsHTML === 'function' ? overviewChartsHTML() : '');
-    if (typeof drawOverviewCharts === 'function') drawOverviewCharts();
-  } else {
-    const k = S.parts.findIndex(p => p.part === S.sel);
-    views.innerHTML = typeof partHTML === 'function' ? partHTML(k) : '<div class="panel">Part view coming in stage 2.</div>';
-    if (typeof drawPart === 'function') drawPart(k);
-  }
-  views.querySelectorAll('[data-goto]').forEach(el => el.onclick = () => select(el.dataset.goto));
-  if (typeof afterRender === 'function') afterRender();
+function varianceEventsHTML() {
+  if (!S.tracker || !S.gl) return '';
+  const ev = [];
+  S.M.parts.forEach(p => p.vflag.forEach((f, i) => f && ev.push({ p, i, f })));
+  ev.sort((a, b) => b.i - a.i || a.p.vr[a.i] - b.p.vr[b.i]);
+  return `<div class="panel"><h2>Unexplained movements <span class="sub">dip change not matched by GL Flex issues &amp; goods in, beyond each part's tolerance</span></h2>
+    ${ev.length ? `<div class="table-wrap"><table class="wo-table"><thead><tr><th>Dip date</th><th>Part</th><th>Description</th>
+      <th class="num">Dip change</th><th class="num">Issued</th><th class="num">Goods in</th><th class="num">Variance L</th><th class="num">£</th><th>Likely cause</th></tr></thead><tbody>
+      ${ev.slice(0, 60).map(({ p, i, f }) => `<tr class="clickable ${f === 'loss' ? 'row-red' : 'row-amber'}" data-goto="${esc(p.part)}">
+        <td>${dLong(S.M.dates[i])}</td><td><span class="badge-navy">${esc(p.part)}</span></td><td>${esc(p.desc)}</td>
+        <td class="num">${fmt(p.change[i], true)}</td><td class="num">${fmt(p.pIss[i])}</td><td class="num">${fmt(p.pGi[i])}</td>
+        <td class="num ${f === 'loss' ? 't-red' : ''}">${fmt(p.vr[i], true)}</td><td class="num">${p.price ? gbp(p.vr[i] * p.price) : '–'}</td>
+        <td>${f === 'loss' ? 'Unbooked issue / leak / loss' : (p.change[i] > 0 && !p.pGi[i]) ? 'Delivery not receipted' : 'Over-booked issue / dip error'}</td></tr>`).join('')}
+      </tbody></table></div>` : '<div class="muted">✔ Every dip movement matches GL Flex within tolerance.</div>'}</div>`;
 }
-function select(part) { S.sel = part; render(); window.scrollTo({ top: 0, behavior: 'smooth' }); }
 
-document.querySelector('aside').addEventListener('click', e => {
-  const it = e.target.closest('.nav-item'); if (it) select(it.dataset.part);
-});
-document.getElementById('trackerFile').addEventListener('change', async e => {
-  const f = e.target.files[0]; if (!f) return;
-  const st = document.getElementById('trackerStatus');
-  try {
-    parseTracker(await readWorkbook(f)); S.trackerName = f.name;
-    derive(); render();
-    st.textContent = `✔ ${f.name}`;
-  } catch (err) { st.textContent = '✖ ' + err.message; alert(err.message); }
-  e.target.value = '';
-});
-</script>
-<script>
-/* ===================== STAGE 2 — charts & part drill-down ===================== */
-const C = { navy: '#2D2A6E', pink: '#E5007D', red: '#e74c3c', green: '#27ae60', amber: '#e67e22', grid: '#e0e0ec', muted: '#6b6b8a' };
-Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
-Chart.defaults.color = C.muted;
-S.range = 'all'; S.alertsOnly = false;
-
-function rangeIdx() {
-  const n = S.dates.length, r = S.range === 'all' ? n : +S.range;
-  return Math.max(0, n - r);
-}
-const ptColor = f => f === 'fall' ? C.red : f === 'rise' ? C.green : C.navy;
-
-function overviewChartsHTML() {
-  return `<div class="panel"><h2>Dip levels <span class="sub"><span class="t-red">●</span> sharp fall &nbsp;<span class="t-green">●</span> sharp rise</span>${rangeButtons()}</h2>
+function miniChartsHTML() {
+  return `<div class="panel"><h2>Stock levels <span class="sub"><span class="legend-line" style="border-color:${C.navy}"></span>dip
+    ${S.soh ? `&nbsp;<span class="legend-line" style="border-color:${C.pink};border-top-style:dashed"></span>system stock` : ''}
+    &nbsp;<span class="t-red">●</span> sharp fall &nbsp;<span class="t-green">●</span> sharp rise</span>${rangeButtons()}</h2>
     <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px">
-    ${S.parts.map((p, k) => `<div class="clickable" data-goto="${esc(p.part)}" style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;cursor:pointer">
+    ${S.M.parts.map((p, k) => `<div data-goto="${esc(p.part)}" style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;cursor:pointer">
       <div style="display:flex;justify-content:space-between;gap:6px;font-size:12px"><b style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p.part)} · ${esc(p.desc)}</b>
       <span class="badges">${p.nFall ? `<span class="badge-red">▼${p.nFall}</span>` : ''}${p.nRise ? `<span class="badge-green">▲${p.nRise}</span>` : ''}</span></div>
       <div style="position:relative;height:120px"><canvas id="mini${k}"></canvas></div></div>`).join('')}
     </div></div>`;
 }
-function rangeButtons() {
-  return `<span class="right">${[['20', '4 wks'], ['65', '13 wks'], ['all', 'All']].map(([v, l]) =>
-    `<button class="toggle-btn ${S.range === v ? 'active' : ''}" data-range="${v}">${l}</button>`).join('')}</span>`;
-}
-function drawOverviewCharts() {
-  const s = rangeIdx(), labels = S.dates.slice(s).map(dLabel);
-  S.parts.forEach((p, k) => {
+function drawMiniCharts() {
+  const s = rangeStart(), labels = S.M.dates.slice(s).map(dLabel);
+  S.M.parts.forEach((p, k) => {
     const el = document.getElementById('mini' + k); if (!el) return;
-    const fl = p.flags.slice(s);
-    S.charts.push(new Chart(el, {
-      type: 'line',
-      data: { labels, datasets: [{ data: S.dips[k].slice(s), borderColor: C.navy, borderWidth: 1.5, spanGaps: true, tension: 0,
-        pointRadius: fl.map(f => f ? 3.5 : 0), pointBackgroundColor: fl.map(ptColor), pointBorderColor: fl.map(ptColor) }] },
+    const fl = p.flag.slice(s), ds = [];
+    if (p.book) ds.push({ data: p.book.slice(s), borderColor: C.pink, borderDash: [4, 3], borderWidth: 1.2, pointRadius: 0, tension: 0, label: 'System' });
+    ds.push({ data: p.dip.slice(s), borderColor: C.navy, borderWidth: 1.6, spanGaps: true, tension: 0, label: 'Dip',
+      pointRadius: fl.map(f => f ? 3.5 : 0), pointBackgroundColor: fl.map(ptColor), pointBorderColor: fl.map(ptColor) });
+    S.charts.push(new Chart(el, { type: 'line', data: { labels, datasets: ds },
       options: { responsive: true, maintainAspectRatio: false, animation: false,
-        plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => `${fmt(c.parsed.y)} ${p.uom}` } } },
-        scales: { x: { display: false }, y: { grid: { color: C.grid }, ticks: { maxTicksLimit: 4, callback: v => fmt(v) } } } }
-    }));
+        plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => `${c.dataset.label}: ${fmt(c.parsed.y)} ${p.uom}` } } },
+        scales: { x: { display: false }, y: { grid: { color: C.grid }, ticks: { maxTicksLimit: 4, callback: v => fmt(v) } } } } }));
   });
 }
 
+function settingsHTML() {
+  const types = Object.keys(S.typeMap).sort();
+  const counts = {}; if (S.gl) S.gl.tx.forEach(t => counts[t.type] = (counts[t.type] || 0) + 1);
+  return `<div class="panel settings"><h2>Settings &amp; how it works</h2>
+    <div style="display:flex;gap:28px;flex-wrap:wrap;align-items:flex-start">
+    ${types.length ? `<div><div class="muted" style="margin-bottom:6px">GL Flex TransactionType</div>
+      ${types.map(t => `<div style="display:flex;gap:8px;align-items:center;margin-bottom:4px">
+        <span class="badge-navy" style="min-width:42px;text-align:center">${esc(t || '(blank)')}</span>
+        <select data-type="${esc(t)}">${Object.entries(TYPE_LABEL).map(([v, l]) => `<option value="${v}" ${S.typeMap[t] === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
+        <span class="muted">${(counts[t] || 0).toLocaleString('en-GB')} lines</span></div>`).join('')}</div>` : ''}
+    ${S.soh ? `<div><div class="muted" style="margin-bottom:6px">Stock on hand is as at</div><input type="date" id="asAt" value="${S.sohAsAt}">
+      <div class="muted" style="margin-top:4px;max-width:200px">GL lines posted up to and including this date are taken as already in the stock-on-hand figure.</div></div>` : ''}
+    <div class="muted" style="max-width:520px;line-height:1.55">
+      <b>Signs:</b> positive TransactionQty = stock out, negative = stock in.<br>
+      <b>Dip periods:</b> each dip is compared with GL lines posted after the previous dip, up to and including the dip day. Saturday and Sunday count towards Monday.<br>
+      <b>Variance</b> = dip change − (goods in − issued). Stock-take adjustments only change the system figure, so they aren't included.<br>
+      <b>Sharp fall</b> = a fall bigger than 1.5× normal GL usage for the days covered (Monday covers 3), and never smaller than the part's minimum.<br>
+      <b>System stock</b> = the stock-on-hand qty, worked back through the GL movements.</div>
+    </div></div>`;
+}
+
+function render() {
+  const M = build(); S.M = M;
+  S.charts.forEach(c => c.destroy()); S.charts = [];
+  if (!M) return;
+  document.getElementById('emptyState').classList.add('hidden');
+  document.getElementById('dash').classList.remove('hidden');
+  renderNav(); renderTiles();
+  const views = document.getElementById('views');
+  if (S.sel === '__all' || !M.parts.some(p => p.part === S.sel)) { S.sel = '__all'; views.innerHTML = overviewHTML(); drawMiniCharts(); }
+  else { const k = M.parts.findIndex(p => p.part === S.sel); views.innerHTML = partHTML(k); drawPart(k); }
+  views.querySelectorAll('[data-goto]').forEach(el => el.onclick = () => select(el.dataset.goto));
+  views.querySelectorAll('[data-range]').forEach(b => b.onclick = e => { e.stopPropagation(); S.range = b.dataset.range; render(); });
+  views.querySelectorAll('select[data-type]').forEach(s => s.onchange = () => { S.typeMap[s.dataset.type] = s.value; render(); });
+  const a = document.getElementById('asAt'); if (a) a.onchange = () => { if (a.value) { S.sohAsAt = a.value; S.sohAsAtUser = true; render(); } };
+  const ao = document.getElementById('alertsOnly'); if (ao) ao.onclick = () => { S.alertsOnly = !S.alertsOnly; render(); };
+  const cb = document.getElementById('csvBtn'); if (cb) cb.onclick = () => exportCSV(M.parts.findIndex(p => p.part === S.sel));
+}
+function select(part) { S.sel = part; render(); window.scrollTo({ top: 0, behavior: 'smooth' }); }
+document.querySelector('aside').addEventListener('click', e => { const it = e.target.closest('.nav-item'); if (it) select(it.dataset.part); });
+
+function loader(inputId, statusId, parse) {
+  document.getElementById(inputId).addEventListener('change', async e => {
+    const f = e.target.files[0]; if (!f) return;
+    const st = document.getElementById(statusId); st.textContent = `Reading ${f.name}…`;
+    try { parse(await readWorkbook(f), f.name); render(); }
+    catch (err) { st.textContent = '✖ ' + err.message; st.classList.remove('ok'); console.error(err); }
+    e.target.value = '';
+  });
+}
+loader('trackerFile', 'trackerStatus', parseTracker);
+loader('glFile', 'glStatus', parseGL);
+loader('sohFile', 'sohStatus', parseSOH);
+</script>
+<script>
+/* ===================== STAGE 3 — part drill-down ===================== */
 function partHTML(k) {
-  const p = S.parts[k], li = p.lastIdx, v = S.dips[k];
-  const gl = !!S.glMap;
+  const M = S.M, p = M.parts[k], li = p.lastIdx, hasDips = !!S.tracker, hasGL = !!S.gl;
+  const df = li != null ? p.diff[li] : null;
+  const days = p.soh && p.usePerDay ? p.soh.qty / p.usePerDay : null;
+  const tile = (l, v, h, cls = '') => `<div class="tile"><div class="lbl">${l}</div><div class="val ${cls}">${v}</div><div class="hint">${h}</div></div>`;
   return `
   <div class="panel"><h2><span class="badge-navy">${esc(p.part)}</span> ${esc(p.desc)}
-    <span class="sub">${esc(p.container)} · fall alert ${fmt(p.fall)} · rise alert ${fmt(p.rise)}${gl ? ` · variance tol ±${fmt(p.tol)}` : ''} ${esc(p.uom)}</span>${rangeButtons()}</h2>
+    <span class="sub">${esc(p.container)}${p.soh && p.soh.bin.length ? ' · bin ' + esc(p.soh.bin.join(', ')) : ''} · tolerance ±${fmt(p.tol)} ${esc(p.uom)}</span>${rangeButtons()}</h2>
     <div class="tiles" style="margin-bottom:10px">
-      <div class="tile"><div class="lbl">Last dip</div><div class="val">${fmt(li != null ? v[li] : null)}</div><div class="hint">${li != null ? dLong(S.dates[li]) : 'never dipped'}</div></div>
-      <div class="tile"><div class="lbl">Last change</div><div class="val ${p.change[li] < 0 ? 'red' : p.change[li] > 0 ? 'green' : ''}">${fmt(li != null ? p.change[li] : null, true)}</div><div class="hint">vs previous dip</div></div>
-      <div class="tile"><div class="lbl">Avg fall / dip</div><div class="val">${fmt(p.avgUse)}</div><div class="hint">normal usage</div></div>
-      <div class="tile"><div class="lbl">Sharp falls / rises</div><div class="val"><span class="t-red">${p.nFall}</span> / <span class="t-green">${p.nRise}</span></div><div class="hint">beyond alert levels</div></div>
-      ${gl ? `<div class="tile"><div class="lbl">Net variance</div><div class="val ${p.totVar < -p.tol ? 'red' : ''}">${fmt(p.totVar, true)}</div><div class="hint">dip vs GL Flex</div></div>` : ''}
+      ${p.soh ? tile('System stock', fmt(p.soh.qty), `${gbp(p.soh.value)} · stock take ${p.soh.st ? dLabel(p.soh.st) : '–'}`) : ''}
+      ${hasDips ? tile('Last dip', fmt(li != null ? p.dip[li] : null), li != null ? dLong(M.dates[li]) : 'not dipped yet') : ''}
+      ${hasDips && p.book ? tile('Dip − system', fmt(df, true), 'at latest dip', df != null && Math.abs(df) >= p.tol ? (df < 0 ? 'red' : 'green') : '') : ''}
+      ${hasGL ? tile('Normal use / day', fmt(p.usePerDay), `Mon ≈ ${fmt(p.useDow[0])}, Tue–Fri ≈ ${fmt((p.useDow[1] + p.useDow[2] + p.useDow[3] + p.useDow[4]) / 4)}`) : ''}
+      ${days != null ? tile('Days of stock', days > 999 ? '999+' : Math.floor(days), 'at normal usage') : ''}
+      ${hasDips ? tile('Sharp falls / rises', `<span class="t-red">${p.nFall}</span> / <span class="t-green">${p.nRise}</span>`, 'on dips') : ''}
+      ${hasDips && hasGL ? tile('Net variance', fmt(p.totVar, true), p.price ? gbp(p.totVar * p.price) : 'dip vs GL Flex', p.totVar <= -p.tol ? 'red' : '') : ''}
     </div>
     <div class="chart-box"><canvas id="lvl"></canvas></div>
   </div>
-  <div class="panel"><h2>Movement between dips <span class="sub">dashed lines = alert levels${gl ? '; pink = issues, green = goods in (GL Flex)' : ''}</span></h2>
-    <div class="chart-box" style="height:260px"><canvas id="chg"></canvas></div></div>
-  <div class="panel"><h2>Dip log
+  ${hasGL || hasDips ? `<div class="panel"><h2>Daily movement <span class="sub">${hasGL ? 'bars = GL Flex (issued down, goods in up, stock take amber)' : ''}${hasDips ? `${hasGL ? '; ' : ''}dots = dip change` : ''}</span></h2>
+    <div class="chart-box" style="height:260px"><canvas id="chg"></canvas></div></div>` : ''}
+  ${hasDips ? `<div class="panel"><h2>Dip log
     <span class="right"><button class="toggle-btn ${S.alertsOnly ? 'active' : ''}" id="alertsOnly">Alerts only</button>
     <button class="action-btn" id="csvBtn">⬇ Export CSV</button></span></h2>
-    <div class="table-wrap">${logTable(k)}</div></div>`;
+    <div class="table-wrap">${logTable(k)}</div></div>` : ''}
+  ${hasGL ? glTxHTML(k) : ''}`;
 }
 
 function logRows(k) {
-  const p = S.parts[k], v = S.dips[k], gl = !!S.glMap, out = [];
-  for (let i = S.dates.length - 1; i >= 0; i--) {
-    const varFlag = gl && p.varFlag ? p.varFlag[i] : null;
-    if (S.alertsOnly && !p.flags[i] && !varFlag) continue;
-    out.push({ i, date: S.dates[i], dip: v[i], prev: p.prevIdx[i] != null ? S.dates[p.prevIdx[i]] : null, change: p.change[i], flag: p.flags[i],
-      iss: gl ? p.iss[i] : null, gi: gl ? p.gi[i] : null, vr: gl ? p.vr[i] : null, varFlag });
+  const M = S.M, p = M.parts[k], out = [];
+  for (let i = M.n - 1; i >= 0; i--) {
+    if (p.dip[i] == null) continue;
+    if (S.alertsOnly && !p.flag[i] && !p.vflag[i]) continue;
+    out.push(i);
   }
   return out;
 }
 function logTable(k) {
-  const p = S.parts[k], gl = !!S.glMap, rows = logRows(k);
-  if (!rows.length) return '<div class="muted" style="padding:10px">No rows to show.</div>';
-  return `<table class="wo-table"><thead><tr><th>Date</th><th class="num">Dip (${esc(p.uom)})</th><th class="num">Change</th><th>Since</th><th>Flag</th>
-    ${gl ? '<th class="num">Issues</th><th class="num">Goods in</th><th class="num">Expected</th><th class="num">Variance</th>' : ''}</tr></thead><tbody>
-    ${rows.map(r => {
-      const cls = r.flag === 'fall' || r.varFlag === 'loss' ? 'row-red' : r.varFlag === 'gain' ? 'row-amber' : r.flag === 'rise' ? 'row-green' : '';
-      const tag = [r.flag === 'fall' ? '<span class="badge-red">▼ Sharp fall</span>' : r.flag === 'rise' ? '<span class="badge-green">▲ Sharp rise</span>' : '',
-        r.varFlag === 'loss' ? '<span class="badge-red">⚠ Unexplained loss</span>' : r.varFlag === 'gain' ? '<span class="badge-navy">⚠ Unexplained gain</span>' : '',
-        r.dip == null ? '<span class="muted">not dipped</span>' : ''].filter(Boolean).join(' ');
-      const exp = gl && r.iss != null ? (r.gi || 0) - (r.iss || 0) : null;
-      return `<tr class="${cls}"><td>${dLong(r.date)}</td><td class="num">${fmt(r.dip)}</td>
-        <td class="num ${r.change < 0 ? 't-red' : r.change > 0 ? 't-green' : ''}">${fmt(r.change, true)}</td>
-        <td class="muted">${r.prev ? dLabel(r.prev) : ''}</td><td>${tag}</td>
-        ${gl ? `<td class="num">${fmt(r.iss)}</td><td class="num">${fmt(r.gi)}</td><td class="num">${fmt(exp, true)}</td>
-        <td class="num ${r.varFlag === 'loss' ? 't-red' : ''}">${fmt(r.vr, true)}</td>` : ''}</tr>`; }).join('')}
+  const M = S.M, p = M.parts[k], gl = !!S.gl, bk = !!p.book, rows = logRows(k);
+  if (!rows.length) return '<div class="muted" style="padding:10px">No dips to show yet.</div>';
+  return `<table class="wo-table"><thead><tr><th>Date</th><th class="num">Dip</th>${bk ? '<th class="num">System</th><th class="num">Dip − system</th>' : ''}
+    <th class="num">Change</th><th>Since</th>${gl ? '<th class="num">Issued</th><th class="num">Goods in</th><th class="num">Stock take</th><th class="num">Expected</th><th class="num">Variance</th>' : ''}<th>Flag</th></tr></thead><tbody>
+    ${rows.map(i => {
+      const f = p.flag[i], v = p.vflag[i];
+      const cls = f === 'fall' || v === 'loss' ? 'row-red' : v === 'gain' ? 'row-amber' : f === 'rise' ? 'row-green' : '';
+      const tag = [f === 'fall' ? `<span class="badge-red" title="Alert level ${fmt(p.lim[i])}">▼ Sharp fall</span>` : f === 'rise' ? '<span class="badge-green">▲ Sharp rise</span>' : '',
+        v === 'loss' ? '<span class="badge-red">⚠ Unexplained loss</span>' : v === 'gain' ? '<span class="badge-navy">⚠ Unexplained gain</span>' : ''].filter(Boolean).join(' ');
+      const ch = p.change[i], d = p.diff[i];
+      return `<tr class="${cls}"><td>${dLong(M.dates[i])}</td><td class="num">${fmt(p.dip[i])}</td>
+        ${bk ? `<td class="num muted">${fmt(p.book[i])}</td><td class="num ${d != null && Math.abs(d) >= p.tol ? (d < 0 ? 't-red' : 't-green') : ''}">${fmt(d, true)}</td>` : ''}
+        <td class="num ${ch < 0 ? 't-red' : ch > 0 ? 't-green' : ''}">${fmt(ch, true)}</td><td class="muted">${p.prev[i] != null ? dLabel(M.dates[p.prev[i]]) : ''}</td>
+        ${gl ? `<td class="num">${fmt(p.pIss[i])}</td><td class="num">${fmt(p.pGi[i])}</td><td class="num muted">${p.pAdj[i] ? fmt(p.pAdj[i], true) : (p.pAdj[i] == null ? '–' : '0')}</td>
+          <td class="num">${fmt(p.exp[i], true)}</td><td class="num ${v === 'loss' ? 't-red' : ''}">${fmt(p.vr[i], true)}</td>` : ''}
+        <td>${tag}</td></tr>`; }).join('')}
   </tbody></table>`;
 }
 
+function glTxHTML(k) {
+  const M = S.M, p = M.parts[k];
+  const bad = new Set(); p.vflag.forEach((f, i) => { if (f) for (let j = p.prev[i] + 1; j <= i; j++) bad.add(j); });
+  const s = rangeStart(), list = p.tx.filter(t => t.k >= s);
+  return `<div class="panel"><h2>GL Flex lines for ${esc(p.part)} <span class="sub">${list.length} lines in view · stock in shown as +, stock out as −</span></h2>
+    ${list.length ? `<div class="table-wrap"><table class="wo-table"><thead><tr><th>Posted</th><th>Type</th><th class="num">Qty</th><th class="num">Value</th>
+      <th>Work order</th><th>Fleet</th><th>Originator</th><th>PO</th><th>Txn no.</th></tr></thead><tbody>
+      ${list.slice(0, 100).map(t => { const m = S.typeMap[t.type], mv = -t.qty;
+        const b = m === 'issue' ? (mv > 0 ? 'badge-navy' : 'badge-red') : m === 'gi' ? (mv > 0 ? 'badge-green' : 'badge-navy') : 'badge-navy';
+        return `<tr class="${bad.has(t.k) ? 'row-amber' : ''}"><td>${dLong(t.iso)}</td>
+        <td><span class="${b}">${esc(t.type)}</span> <span class="muted">${TYPE_LABEL[m]}</span></td>
+        <td class="num ${mv < 0 ? 't-red' : 't-green'}">${fmt(mv, true)}</td><td class="num muted">${t.val != null ? gbp(Math.abs(t.val)) : ''}</td>
+        <td>${esc(t.wo)}</td><td>${esc(t.fleet)}</td><td>${esc(t.who)}</td><td>${esc(t.po)}</td><td class="muted">${esc(t.no)}</td></tr>`; }).join('')}
+      </tbody></table></div>${list.length > 100 ? `<div class="muted" style="margin-top:6px">Showing latest 100 of ${list.length}.</div>` : ''}`
+      : '<div class="muted">No GL Flex lines for this part in the selected range.</div>'}</div>`;
+}
+
 function drawPart(k) {
-  const p = S.parts[k], s = rangeIdx(), labels = S.dates.slice(s).map(dLabel), fl = p.flags.slice(s);
-  const gl = !!S.glMap;
-  const tip = { callbacks: { label: c => `${c.dataset.label}: ${fmt(c.parsed.y, c.dataset.signed)} ${p.uom}` } };
+  const M = S.M, p = M.parts[k], s = rangeStart(), labels = M.dates.slice(s).map(dLabel), fl = p.flag.slice(s);
+  const xs = { grid: { display: false }, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 14 } };
+  const ds = [];
+  if (p.book) ds.push({ label: 'System stock', data: p.book.slice(s), borderColor: C.pink, borderDash: [6, 4], borderWidth: 1.6, pointRadius: 0, tension: 0, stepped: 'before' });
+  if (S.tracker) ds.push({ label: 'Dip', data: p.dip.slice(s), borderColor: C.navy, backgroundColor: 'rgba(45,42,110,0.07)', fill: !p.book, borderWidth: 2,
+    spanGaps: true, tension: 0, pointRadius: fl.map(f => f ? 6 : 2.5), pointHoverRadius: 7, pointBackgroundColor: fl.map(ptColor), pointBorderColor: fl.map(ptColor) });
   S.charts.push(new Chart(document.getElementById('lvl'), {
-    type: 'line',
-    data: { labels, datasets: [{ label: 'Dip level', data: S.dips[k].slice(s), borderColor: C.navy, backgroundColor: 'rgba(45,42,110,0.08)',
-      fill: true, borderWidth: 2, spanGaps: true, tension: 0,
-      pointRadius: fl.map(f => f ? 6 : 2.5), pointHoverRadius: 7, pointBackgroundColor: fl.map(ptColor), pointBorderColor: fl.map(ptColor) }] },
+    type: 'line', data: { labels, datasets: ds },
     options: { responsive: true, maintainAspectRatio: false, animation: false, interaction: { mode: 'index', intersect: false },
-      plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => `Dip: ${fmt(c.parsed.y)} ${p.uom}`,
-        afterLabel: c => { const i = c.dataIndex + s, ch = p.change[i]; return ch == null ? '' :
-          `Change: ${fmt(ch, true)}${p.flags[i] === 'fall' ? '  ▼ SHARP FALL' : p.flags[i] === 'rise' ? '  ▲ SHARP RISE' : ''}`; } } } },
-      scales: { x: { grid: { display: false }, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 14 } },
-        y: { grid: { color: C.grid }, ticks: { callback: v => fmt(v) }, title: { display: true, text: p.uom } } } }
+      plugins: { legend: { display: ds.length > 1, labels: { boxWidth: 14 } }, tooltip: { callbacks: { label: c => `${c.dataset.label}: ${fmt(c.parsed.y)} ${p.uom}`,
+        afterBody: it => { const i = it[0].dataIndex + s, out = [];
+          if (p.change[i] != null) out.push(`Dip change: ${fmt(p.change[i], true)}${p.flag[i] === 'fall' ? '  ▼ SHARP FALL' : p.flag[i] === 'rise' ? '  ▲ SHARP RISE' : ''}`);
+          if (p.diff[i] != null) out.push(`Dip − system: ${fmt(p.diff[i], true)}`);
+          return out; } } } },
+      scales: { x: xs, y: { grid: { color: C.grid }, ticks: { callback: v => fmt(v) }, title: { display: true, text: p.uom } } } }
   }));
-  const ch = p.change.slice(s);
-  const ds = [
-    { type: 'bar', label: 'Dip change', signed: true, data: ch, order: 2,
-      backgroundColor: ch.map((c, j) => fl[j] === 'fall' ? C.red : fl[j] === 'rise' ? C.green : 'rgba(45,42,110,0.35)') },
-    { type: 'line', label: 'Fall alert', data: labels.map(() => -p.fall), borderColor: C.red, borderDash: [5, 4], borderWidth: 1, pointRadius: 0, order: 0 },
-    { type: 'line', label: 'Rise alert', data: labels.map(() => p.rise), borderColor: C.green, borderDash: [5, 4], borderWidth: 1, pointRadius: 0, order: 0 },
-  ];
-  if (gl) {
-    ds.push({ type: 'line', label: 'Issues (−)', signed: true, data: p.iss.slice(s).map(x => x == null ? null : -x), borderColor: C.pink, backgroundColor: C.pink,
-      borderWidth: 0, showLine: false, pointStyle: 'rectRot', pointRadius: 5, order: 1 });
-    ds.push({ type: 'line', label: 'Goods in (+)', signed: true, data: p.gi.slice(s).map(x => x ? x : null), borderColor: C.green, backgroundColor: '#fff',
-      borderWidth: 2, showLine: false, pointStyle: 'triangle', pointRadius: 6, order: 1 });
+  const el = document.getElementById('chg'); if (!el) return;
+  const mv = [];
+  if (S.gl) {
+    mv.push({ type: 'bar', label: 'Issued', data: p.iss.slice(s).map(x => x ? -x : null), backgroundColor: 'rgba(229,0,125,0.55)', stack: 'gl', order: 2 });
+    mv.push({ type: 'bar', label: 'Goods in', data: p.gi.slice(s).map(x => x || null), backgroundColor: 'rgba(39,174,96,0.7)', stack: 'gl', order: 2 });
+    if (p.adj.some(x => x)) mv.push({ type: 'bar', label: 'Stock take adj.', data: p.adj.slice(s).map(x => x || null), backgroundColor: 'rgba(230,126,34,0.8)', stack: 'gl', order: 2 });
   }
-  S.charts.push(new Chart(document.getElementById('chg'), {
-    data: { labels, datasets: ds },
+  if (S.tracker) mv.push({ type: 'line', label: 'Dip change', data: p.change.slice(s), showLine: false, order: 0,
+    pointRadius: fl.map(f => f ? 6 : 3.5), pointBackgroundColor: fl.map(ptColor), pointBorderColor: '#fff', pointBorderWidth: 1 });
+  S.charts.push(new Chart(el, { data: { labels, datasets: mv },
     options: { responsive: true, maintainAspectRatio: false, animation: false, interaction: { mode: 'index', intersect: false },
-      plugins: { legend: { labels: { boxWidth: 12, filter: i => !i.text.includes('alert') } }, tooltip: tip },
-      scales: { x: { grid: { display: false }, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 14 } },
-        y: { grid: { color: C.grid }, ticks: { callback: v => fmt(v, true) } } } }
-  }));
+      plugins: { legend: { labels: { boxWidth: 12 } }, tooltip: { callbacks: { label: c => `${c.dataset.label}: ${fmt(c.parsed.y, true)} ${p.uom}` } } },
+      scales: { x: { ...xs, stacked: true }, y: { stacked: true, grid: { color: C.grid }, ticks: { callback: v => fmt(v, true) } } } } }));
 }
 
 function exportCSV(k) {
-  const p = S.parts[k], gl = !!S.glMap;
-  const head = ['Date', 'Part', 'Description', 'Dip', 'Change', 'Flag'].concat(gl ? ['Issues', 'GoodsIn', 'Variance', 'VarianceFlag'] : []);
-  const lines = [head.join(',')].concat(logRows(k).reverse().map(r => [r.date, p.part, `"${String(p.desc).replace(/"/g, '""')}"`, r.dip ?? '', r.change ?? '', r.flag ?? '']
-    .concat(gl ? [r.iss ?? '', r.gi ?? '', r.vr ?? '', r.varFlag ?? ''] : []).join(',')));
+  const M = S.M, p = M.parts[k];
+  const q = v => v == null ? '' : typeof v === 'number' ? Math.round(v * 100) / 100 : `"${String(v).replace(/"/g, '""')}"`;
+  const head = ['Date', 'Part', 'Description', 'Dip', 'System', 'DipMinusSystem', 'Change', 'Issued', 'GoodsIn', 'StockTake', 'Expected', 'Variance', 'VarianceGBP', 'Flag', 'VarianceFlag'];
+  const lines = [head.join(',')].concat(logRows(k).reverse().map(i => [M.dates[i], p.part, p.desc, p.dip[i], p.book ? p.book[i] : null, p.diff[i], p.change[i],
+    p.pIss[i], p.pGi[i], p.pAdj[i], p.exp[i], p.vr[i], p.vr[i] != null && p.price ? p.vr[i] * p.price : null, p.flag[i], p.vflag[i]].map(q).join(',')));
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([lines.join('\n')], { type: 'text/csv' }));
   a.download = `dip_log_${p.part}.csv`; a.click();
 }
-
-function afterRender() {
-  document.querySelectorAll('[data-range]').forEach(b => b.onclick = e => { e.stopPropagation(); S.range = b.dataset.range; render(); });
-  const ao = document.getElementById('alertsOnly'); if (ao) ao.onclick = () => { S.alertsOnly = !S.alertsOnly; render(); };
-  const cb = document.getElementById('csvBtn'); if (cb) cb.onclick = () => exportCSV(S.parts.findIndex(p => p.part === S.sel));
-}
-</script>
-<script>
-/* ===================== STAGE 3 — GL Flex issues / goods in / variance ===================== */
-const GL_POS = { TransactionType: 0, PostingDate: 1, TransactionNumber: 2, CCDesc: 12, UOM: 17, TransactionQty: 18, TransactionValue: 19,
-  Plant: 20, Store: 21, Part: 22, PartDesc: 23, FleetNumber: 26, PO: 27, BIN: 29, Originator: 30, WorkOrder: 31 };
-const GI_DEFAULT = ['R', 'GR', 'GRN', 'REC', 'RCPT', 'P', 'PO'];
-S.typeMap = {}; S.plantFilter = '__all';
-
-function parseGL(rows, source) {
-  let h = 0;
-  while (h < Math.min(rows.length, 10) && !(rows[h] || []).some(c => String(c ?? '').trim().toLowerCase() === 'transactiontype')) h++;
-  if (h >= Math.min(rows.length, 10)) h = 0;
-  const head = (rows[h] || []).map(c => String(c ?? '').trim().toLowerCase());
-  const col = {};
-  for (const [k, pos] of Object.entries(GL_POS)) { const i = head.indexOf(k.toLowerCase()); col[k] = i >= 0 ? i : pos; }
-  const tx = [];
-  for (let r = h + 1; r < rows.length; r++) {
-    const row = rows[r]; if (!row) continue;
-    const part = normPart(row[col.Part]), iso = toISO(row[col.PostingDate]), qty = num(row[col.TransactionQty]);
-    if (!part || !iso || qty == null) continue;
-    tx.push({ type: String(row[col.TransactionType] ?? '').trim().toUpperCase(), iso, qty: Math.abs(qty), part,
-      no: row[col.TransactionNumber], plant: String(row[col.Plant] ?? '').trim(), cc: row[col.CCDesc] ?? '',
-      fleet: row[col.FleetNumber] ?? '', wo: row[col.WorkOrder] ?? '', who: row[col.Originator] ?? '', po: row[col.PO] ?? '',
-      val: num(row[col.TransactionValue]) });
-  }
-  S.gl = tx; S.glSource = source;
-  [...new Set(tx.map(t => t.type))].forEach(t => {
-    if (!(t in S.typeMap)) S.typeMap[t] = t === 'I' ? 'issue' : GI_DEFAULT.includes(t) ? 'gi' : 'ignore';
-  });
-  const ds = tx.map(t => t.iso).sort();
-  const st = document.getElementById('glStatus');
-  st.textContent = tx.length ? `✔ ${tx.length} GL lines (${dLabel(ds[0])} – ${dLabel(ds[ds.length - 1])}) from ${source}` : `✖ no GL lines found in ${source}`;
-}
-
-function deriveGL() {
-  if (!S.gl || !S.gl.length) { S.glMap = null; S.parts.forEach(p => p.nVar = 0); return; }
-  S.glMap = true;
-  const ours = new Set(S.parts.map(p => p.part));
-  const byPart = {};
-  S.gl.forEach(t => {
-    if (!ours.has(t.part)) return;
-    if (S.plantFilter !== '__all' && t.plant !== S.plantFilter) return;
-    const m = S.typeMap[t.type]; if (m !== 'issue' && m !== 'gi') return;
-    (byPart[t.part] ||= []).push(t);
-  });
-  S.parts.forEach((p, k) => {
-    const n = S.dates.length;
-    p.iss = Array(n).fill(null); p.gi = Array(n).fill(null); p.vr = Array(n).fill(null); p.varFlag = Array(n).fill(null);
-    p.tx = (byPart[p.part] || []).slice().sort((a, b) => a.iso < b.iso ? 1 : -1);
-    p.pending = { iss: 0, gi: 0 };
-    const rec = []; S.dips[k].forEach((v, i) => v != null && rec.push(i));
-    const sums = {}; // dip index -> {iss, gi}
-    p.tx.forEach(t => {
-      // period = (previous recorded dip, this recorded dip]
-      let lo = 0, hi = rec.length - 1, j = -1;
-      while (lo <= hi) { const m = (lo + hi) >> 1; if (S.dates[rec[m]] >= t.iso) { j = m; hi = m - 1; } else lo = m + 1; }
-      t.period = null;
-      if (j === -1) { p.pending[S.typeMap[t.type] === 'issue' ? 'iss' : 'gi'] += t.qty; return; }  // after last dip
-      if (j === 0) return;                                                                         // before first dip
-      const i = rec[j]; t.period = i;
-      const s = sums[i] ||= { iss: 0, gi: 0 };
-      if (S.typeMap[t.type] === 'issue') s.iss += t.qty; else s.gi += t.qty;
-    });
-    p.totIss = 0; p.totGI = 0; p.totVar = 0; p.nVar = 0;
-    rec.forEach(i => {
-      if (p.change[i] == null) return;
-      const s = sums[i] || { iss: 0, gi: 0 };
-      p.iss[i] = s.iss; p.gi[i] = s.gi;
-      p.vr[i] = p.change[i] - (s.gi - s.iss);
-      p.varFlag[i] = p.vr[i] <= -p.tol ? 'loss' : p.vr[i] >= p.tol ? 'gain' : null;
-      if (p.varFlag[i]) p.nVar++;
-      p.totIss += s.iss; p.totGI += s.gi; p.totVar += p.vr[i];
-    });
-  });
-}
-
-function glSetupHTML() {
-  if (!S.gl) return `<div class="panel"><h2>GL Flex <span class="sub">Load the depot's GL Flex export to compare dips with booked issues &amp; goods in.</span></h2></div>`;
-  const types = Object.keys(S.typeMap).sort();
-  const counts = {}; S.gl.forEach(t => counts[t.type] = (counts[t.type] || 0) + 1);
-  const plants = [...new Set(S.gl.map(t => t.plant).filter(Boolean))].sort();
-  const ourLines = S.parts.reduce((a, p) => a + (p.tx ? p.tx.length : 0), 0);
-  return `<div class="panel"><h2>GL Flex mapping <span class="sub">${esc(S.glSource)} · ${S.gl.length} lines, ${ourLines} for tracked parts</span></h2>
-    <div style="display:flex;gap:24px;flex-wrap:wrap;align-items:flex-start">
-      <div><div class="muted" style="margin-bottom:6px">TransactionType meaning</div>
-      ${types.map(t => `<div style="display:flex;gap:8px;align-items:center;margin-bottom:4px">
-        <span class="badge-navy" style="min-width:34px;text-align:center">${esc(t || '(blank)')}</span>
-        <select data-type="${esc(t)}" style="font-size:12px;padding:3px">
-          ${[['issue', 'Issue (stock out)'], ['gi', 'Goods in (stock in)'], ['ignore', 'Ignore']].map(([v, l]) =>
-            `<option value="${v}" ${S.typeMap[t] === v ? 'selected' : ''}>${l}</option>`).join('')}
-        </select><span class="muted">${counts[t] || 0} lines</span></div>`).join('')}</div>
-      ${plants.length > 1 ? `<div><div class="muted" style="margin-bottom:6px">Plant filter</div>
-        <select id="plantSel" style="font-size:12px;padding:3px"><option value="__all">All plants</option>
-        ${plants.map(pl => `<option ${S.plantFilter === pl ? 'selected' : ''}>${esc(pl)}</option>`).join('')}</select></div>` : ''}
-      <div class="muted" style="max-width:420px;line-height:1.5">Each dip is compared with GL lines posted after the previous recorded dip up to and including the dip day
-        (Monday picks up the weekend). <b>Variance = dip change − (goods in − issues)</b>. Negative means more product went than was booked out.</div>
-    </div></div>`;
-}
-
-function varianceEventsHTML() {
-  if (!S.glMap) return '';
-  const ev = [];
-  S.parts.forEach((p, k) => p.varFlag.forEach((f, i) => f && ev.push({ p, k, i, f })));
-  ev.sort((a, b) => a.i === b.i ? a.p.vr[a.i] - b.p.vr[b.i] : b.i - a.i);
-  return `<div class="panel"><h2>Unexplained movements <span class="sub">dip change not matched by GL Flex beyond each part's tolerance</span></h2>
-    ${ev.length ? `<div class="table-wrap"><table class="wo-table"><thead><tr><th>Date</th><th>Part</th><th>Description</th>
-      <th class="num">Dip change</th><th class="num">Issues</th><th class="num">Goods in</th><th class="num">Variance</th><th>Likely cause</th></tr></thead><tbody>
-      ${ev.slice(0, 60).map(({ p, i, f }) => `<tr class="clickable ${f === 'loss' ? 'row-red' : 'row-amber'}" data-goto="${esc(p.part)}">
-        <td>${dLong(S.dates[i])}</td><td><span class="badge-navy">${esc(p.part)}</span></td><td>${esc(p.desc)}</td>
-        <td class="num">${fmt(p.change[i], true)}</td><td class="num">${fmt(p.iss[i])}</td><td class="num">${fmt(p.gi[i])}</td>
-        <td class="num ${f === 'loss' ? 't-red' : ''}">${fmt(p.vr[i], true)}</td>
-        <td>${f === 'loss' ? 'Unbooked issue / leak / loss' : (p.change[i] > 0 && !p.gi[i]) ? 'Delivery not receipted' : 'Over-booked issue / dip error'}</td></tr>`).join('')}
-      </tbody></table></div>` : '<div class="muted">✔ All dip movements reconcile with GL Flex within tolerance.</div>'}
-  </div>`;
-}
-
-function glTxHTML(k) {
-  const p = S.parts[k];
-  if (!S.glMap) return '';
-  const pend = p.pending.iss || p.pending.gi ? `<span class="sub">Awaiting next dip: issues ${fmt(p.pending.iss)}, goods in ${fmt(p.pending.gi)}</span>` : '';
-  const bad = new Set(p.varFlag.map((f, i) => f ? i : null).filter(i => i != null));
-  return `<div class="panel"><h2>GL Flex lines for ${esc(p.part)} ${pend}</h2>
-    ${p.tx.length ? `<div class="table-wrap"><table class="wo-table"><thead><tr><th>Posted</th><th>Type</th><th class="num">Qty</th><th>Counted in dip</th>
-      <th>Work order</th><th>Fleet</th><th>Originator</th><th>PO</th><th>Txn no.</th></tr></thead><tbody>
-      ${p.tx.slice(0, 200).map(t => `<tr class="${t.period != null && bad.has(t.period) ? 'row-amber' : ''}">
-        <td>${dLong(t.iso)}</td><td>${S.typeMap[t.type] === 'issue' ? `<span class="badge-red">${esc(t.type)} Issue</span>` : `<span class="badge-green">${esc(t.type)} Goods in</span>`}</td>
-        <td class="num">${fmt(t.qty)}</td><td class="muted">${t.period != null ? dLabel(S.dates[t.period]) : 'pending / before first dip'}</td>
-        <td>${esc(t.wo)}</td><td>${esc(t.fleet)}</td><td>${esc(t.who)}</td><td>${esc(t.po)}</td><td class="muted">${esc(t.no)}</td></tr>`).join('')}
-      </tbody></table></div>${p.tx.length > 200 ? `<div class="muted" style="margin-top:6px">Showing latest 200 of ${p.tx.length}.</div>` : ''}`
-      : '<div class="muted">No issues or goods in booked against this part in the loaded GL Flex.</div>'}
-  </div>`;
-}
-
-// extend stage 1/2 views
-const _overviewHTML = overviewHTML;
-overviewHTML = () => _overviewHTML() + varianceEventsHTML() + glSetupHTML();
-const _partHTML = partHTML;
-partHTML = k => _partHTML(k) + glTxHTML(k);
-const _afterRender = afterRender;
-afterRender = () => {
-  _afterRender();
-  document.querySelectorAll('select[data-type]').forEach(s => s.onchange = () => { S.typeMap[s.dataset.type] = s.value; derive(); render(); });
-  const ps = document.getElementById('plantSel'); if (ps) ps.onchange = () => { S.plantFilter = ps.value; derive(); render(); };
-};
-
-document.getElementById('glFile').addEventListener('change', async e => {
-  const f = e.target.files[0]; if (!f) return;
-  try {
-    const wb = await readWorkbook(f);
-    const name = wb.SheetNames.find(n => rowsOf(wb.Sheets[n]).slice(0, 10).some(r => (r || []).some(c => String(c ?? '').trim().toLowerCase() === 'transactiontype')))
-      || wb.SheetNames[0];
-    parseGL(rowsOf(wb.Sheets[name]), f.name); S.glExternal = true;
-    if (S.parts.length) { derive(); render(); }
-  } catch (err) { document.getElementById('glStatus').textContent = '✖ ' + err.message; alert(err.message); }
-  e.target.value = '';
-});
 </script>
 </body>
 </html>
