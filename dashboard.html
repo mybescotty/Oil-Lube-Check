@@ -171,7 +171,7 @@ const normPart = v => String(v ?? '').trim().replace(/\.0+$/, '').toUpperCase();
 function readWorkbook(file) {
   return file.arrayBuffer().then(buf => XLSX.read(buf, { type: 'array', cellDates: false }));
 }
-const rowsOf = ws => XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null, blankrows: false });
+const rowsOf = ws => XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null, blankrows: true });
 
 function parseTracker(wb) {
   const ps = wb.Sheets['Parts'], ds = wb.Sheets['Dips'];
@@ -316,6 +316,154 @@ document.getElementById('trackerFile').addEventListener('change', async e => {
   } catch (err) { st.textContent = '✖ ' + err.message; alert(err.message); }
   e.target.value = '';
 });
+</script>
+<script>
+/* ===================== STAGE 2 — charts & part drill-down ===================== */
+const C = { navy: '#2D2A6E', pink: '#E5007D', red: '#e74c3c', green: '#27ae60', amber: '#e67e22', grid: '#e0e0ec', muted: '#6b6b8a' };
+Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
+Chart.defaults.color = C.muted;
+S.range = 'all'; S.alertsOnly = false;
+
+function rangeIdx() {
+  const n = S.dates.length, r = S.range === 'all' ? n : +S.range;
+  return Math.max(0, n - r);
+}
+const ptColor = f => f === 'fall' ? C.red : f === 'rise' ? C.green : C.navy;
+
+function overviewChartsHTML() {
+  return `<div class="panel"><h2>Dip levels <span class="sub"><span class="t-red">●</span> sharp fall &nbsp;<span class="t-green">●</span> sharp rise</span>${rangeButtons()}</h2>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px">
+    ${S.parts.map((p, k) => `<div class="clickable" data-goto="${esc(p.part)}" style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;cursor:pointer">
+      <div style="display:flex;justify-content:space-between;gap:6px;font-size:12px"><b style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p.part)} · ${esc(p.desc)}</b>
+      <span class="badges">${p.nFall ? `<span class="badge-red">▼${p.nFall}</span>` : ''}${p.nRise ? `<span class="badge-green">▲${p.nRise}</span>` : ''}</span></div>
+      <div style="position:relative;height:120px"><canvas id="mini${k}"></canvas></div></div>`).join('')}
+    </div></div>`;
+}
+function rangeButtons() {
+  return `<span class="right">${[['20', '4 wks'], ['65', '13 wks'], ['all', 'All']].map(([v, l]) =>
+    `<button class="toggle-btn ${S.range === v ? 'active' : ''}" data-range="${v}">${l}</button>`).join('')}</span>`;
+}
+function drawOverviewCharts() {
+  const s = rangeIdx(), labels = S.dates.slice(s).map(dLabel);
+  S.parts.forEach((p, k) => {
+    const el = document.getElementById('mini' + k); if (!el) return;
+    const fl = p.flags.slice(s);
+    S.charts.push(new Chart(el, {
+      type: 'line',
+      data: { labels, datasets: [{ data: S.dips[k].slice(s), borderColor: C.navy, borderWidth: 1.5, spanGaps: true, tension: 0,
+        pointRadius: fl.map(f => f ? 3.5 : 0), pointBackgroundColor: fl.map(ptColor), pointBorderColor: fl.map(ptColor) }] },
+      options: { responsive: true, maintainAspectRatio: false, animation: false,
+        plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => `${fmt(c.parsed.y)} ${p.uom}` } } },
+        scales: { x: { display: false }, y: { grid: { color: C.grid }, ticks: { maxTicksLimit: 4, callback: v => fmt(v) } } } }
+    }));
+  });
+}
+
+function partHTML(k) {
+  const p = S.parts[k], li = p.lastIdx, v = S.dips[k];
+  const gl = !!S.glMap;
+  return `
+  <div class="panel"><h2><span class="badge-navy">${esc(p.part)}</span> ${esc(p.desc)}
+    <span class="sub">${esc(p.container)} · fall alert ${fmt(p.fall)} · rise alert ${fmt(p.rise)}${gl ? ` · variance tol ±${fmt(p.tol)}` : ''} ${esc(p.uom)}</span>${rangeButtons()}</h2>
+    <div class="tiles" style="margin-bottom:10px">
+      <div class="tile"><div class="lbl">Last dip</div><div class="val">${fmt(li != null ? v[li] : null)}</div><div class="hint">${li != null ? dLong(S.dates[li]) : 'never dipped'}</div></div>
+      <div class="tile"><div class="lbl">Last change</div><div class="val ${p.change[li] < 0 ? 'red' : p.change[li] > 0 ? 'green' : ''}">${fmt(li != null ? p.change[li] : null, true)}</div><div class="hint">vs previous dip</div></div>
+      <div class="tile"><div class="lbl">Avg fall / dip</div><div class="val">${fmt(p.avgUse)}</div><div class="hint">normal usage</div></div>
+      <div class="tile"><div class="lbl">Sharp falls / rises</div><div class="val"><span class="t-red">${p.nFall}</span> / <span class="t-green">${p.nRise}</span></div><div class="hint">beyond alert levels</div></div>
+      ${gl ? `<div class="tile"><div class="lbl">Net variance</div><div class="val ${p.totVar < -p.tol ? 'red' : ''}">${fmt(p.totVar, true)}</div><div class="hint">dip vs GL Flex</div></div>` : ''}
+    </div>
+    <div class="chart-box"><canvas id="lvl"></canvas></div>
+  </div>
+  <div class="panel"><h2>Movement between dips <span class="sub">dashed lines = alert levels${gl ? '; pink = issues, green = goods in (GL Flex)' : ''}</span></h2>
+    <div class="chart-box" style="height:260px"><canvas id="chg"></canvas></div></div>
+  <div class="panel"><h2>Dip log
+    <span class="right"><button class="toggle-btn ${S.alertsOnly ? 'active' : ''}" id="alertsOnly">Alerts only</button>
+    <button class="action-btn" id="csvBtn">⬇ Export CSV</button></span></h2>
+    <div class="table-wrap">${logTable(k)}</div></div>`;
+}
+
+function logRows(k) {
+  const p = S.parts[k], v = S.dips[k], gl = !!S.glMap, out = [];
+  for (let i = S.dates.length - 1; i >= 0; i--) {
+    const varFlag = gl && p.varFlag ? p.varFlag[i] : null;
+    if (S.alertsOnly && !p.flags[i] && !varFlag) continue;
+    out.push({ i, date: S.dates[i], dip: v[i], prev: p.prevIdx[i] != null ? S.dates[p.prevIdx[i]] : null, change: p.change[i], flag: p.flags[i],
+      iss: gl ? p.iss[i] : null, gi: gl ? p.gi[i] : null, vr: gl ? p.vr[i] : null, varFlag });
+  }
+  return out;
+}
+function logTable(k) {
+  const p = S.parts[k], gl = !!S.glMap, rows = logRows(k);
+  if (!rows.length) return '<div class="muted" style="padding:10px">No rows to show.</div>';
+  return `<table class="wo-table"><thead><tr><th>Date</th><th class="num">Dip (${esc(p.uom)})</th><th class="num">Change</th><th>Since</th><th>Flag</th>
+    ${gl ? '<th class="num">Issues</th><th class="num">Goods in</th><th class="num">Expected</th><th class="num">Variance</th>' : ''}</tr></thead><tbody>
+    ${rows.map(r => {
+      const cls = r.flag === 'fall' || r.varFlag === 'loss' ? 'row-red' : r.varFlag === 'gain' ? 'row-amber' : r.flag === 'rise' ? 'row-green' : '';
+      const tag = [r.flag === 'fall' ? '<span class="badge-red">▼ Sharp fall</span>' : r.flag === 'rise' ? '<span class="badge-green">▲ Sharp rise</span>' : '',
+        r.varFlag === 'loss' ? '<span class="badge-red">⚠ Unexplained loss</span>' : r.varFlag === 'gain' ? '<span class="badge-navy">⚠ Unexplained gain</span>' : '',
+        r.dip == null ? '<span class="muted">not dipped</span>' : ''].filter(Boolean).join(' ');
+      const exp = gl && r.iss != null ? (r.gi || 0) - (r.iss || 0) : null;
+      return `<tr class="${cls}"><td>${dLong(r.date)}</td><td class="num">${fmt(r.dip)}</td>
+        <td class="num ${r.change < 0 ? 't-red' : r.change > 0 ? 't-green' : ''}">${fmt(r.change, true)}</td>
+        <td class="muted">${r.prev ? dLabel(r.prev) : ''}</td><td>${tag}</td>
+        ${gl ? `<td class="num">${fmt(r.iss)}</td><td class="num">${fmt(r.gi)}</td><td class="num">${fmt(exp, true)}</td>
+        <td class="num ${r.varFlag === 'loss' ? 't-red' : ''}">${fmt(r.vr, true)}</td>` : ''}</tr>`; }).join('')}
+  </tbody></table>`;
+}
+
+function drawPart(k) {
+  const p = S.parts[k], s = rangeIdx(), labels = S.dates.slice(s).map(dLabel), fl = p.flags.slice(s);
+  const gl = !!S.glMap;
+  const tip = { callbacks: { label: c => `${c.dataset.label}: ${fmt(c.parsed.y, c.dataset.signed)} ${p.uom}` } };
+  S.charts.push(new Chart(document.getElementById('lvl'), {
+    type: 'line',
+    data: { labels, datasets: [{ label: 'Dip level', data: S.dips[k].slice(s), borderColor: C.navy, backgroundColor: 'rgba(45,42,110,0.08)',
+      fill: true, borderWidth: 2, spanGaps: true, tension: 0,
+      pointRadius: fl.map(f => f ? 6 : 2.5), pointHoverRadius: 7, pointBackgroundColor: fl.map(ptColor), pointBorderColor: fl.map(ptColor) }] },
+    options: { responsive: true, maintainAspectRatio: false, animation: false, interaction: { mode: 'index', intersect: false },
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => `Dip: ${fmt(c.parsed.y)} ${p.uom}`,
+        afterLabel: c => { const i = c.dataIndex + s, ch = p.change[i]; return ch == null ? '' :
+          `Change: ${fmt(ch, true)}${p.flags[i] === 'fall' ? '  ▼ SHARP FALL' : p.flags[i] === 'rise' ? '  ▲ SHARP RISE' : ''}`; } } } },
+      scales: { x: { grid: { display: false }, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 14 } },
+        y: { grid: { color: C.grid }, ticks: { callback: v => fmt(v) }, title: { display: true, text: p.uom } } } }
+  }));
+  const ch = p.change.slice(s);
+  const ds = [
+    { type: 'bar', label: 'Dip change', signed: true, data: ch, order: 2,
+      backgroundColor: ch.map((c, j) => fl[j] === 'fall' ? C.red : fl[j] === 'rise' ? C.green : 'rgba(45,42,110,0.35)') },
+    { type: 'line', label: 'Fall alert', data: labels.map(() => -p.fall), borderColor: C.red, borderDash: [5, 4], borderWidth: 1, pointRadius: 0, order: 0 },
+    { type: 'line', label: 'Rise alert', data: labels.map(() => p.rise), borderColor: C.green, borderDash: [5, 4], borderWidth: 1, pointRadius: 0, order: 0 },
+  ];
+  if (gl) {
+    ds.push({ type: 'line', label: 'Issues (−)', signed: true, data: p.iss.slice(s).map(x => x == null ? null : -x), borderColor: C.pink, backgroundColor: C.pink,
+      borderWidth: 0, showLine: false, pointStyle: 'rectRot', pointRadius: 5, order: 1 });
+    ds.push({ type: 'line', label: 'Goods in (+)', signed: true, data: p.gi.slice(s).map(x => x ? x : null), borderColor: C.green, backgroundColor: '#fff',
+      borderWidth: 2, showLine: false, pointStyle: 'triangle', pointRadius: 6, order: 1 });
+  }
+  S.charts.push(new Chart(document.getElementById('chg'), {
+    data: { labels, datasets: ds },
+    options: { responsive: true, maintainAspectRatio: false, animation: false, interaction: { mode: 'index', intersect: false },
+      plugins: { legend: { labels: { boxWidth: 12, filter: i => !i.text.includes('alert') } }, tooltip: tip },
+      scales: { x: { grid: { display: false }, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 14 } },
+        y: { grid: { color: C.grid }, ticks: { callback: v => fmt(v, true) } } } }
+  }));
+}
+
+function exportCSV(k) {
+  const p = S.parts[k], gl = !!S.glMap;
+  const head = ['Date', 'Part', 'Description', 'Dip', 'Change', 'Flag'].concat(gl ? ['Issues', 'GoodsIn', 'Variance', 'VarianceFlag'] : []);
+  const lines = [head.join(',')].concat(logRows(k).reverse().map(r => [r.date, p.part, `"${String(p.desc).replace(/"/g, '""')}"`, r.dip ?? '', r.change ?? '', r.flag ?? '']
+    .concat(gl ? [r.iss ?? '', r.gi ?? '', r.vr ?? '', r.varFlag ?? ''] : []).join(',')));
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([lines.join('\n')], { type: 'text/csv' }));
+  a.download = `dip_log_${p.part}.csv`; a.click();
+}
+
+function afterRender() {
+  document.querySelectorAll('[data-range]').forEach(b => b.onclick = e => { e.stopPropagation(); S.range = b.dataset.range; render(); });
+  const ao = document.getElementById('alertsOnly'); if (ao) ao.onclick = () => { S.alertsOnly = !S.alertsOnly; render(); };
+  const cb = document.getElementById('csvBtn'); if (cb) cb.onclick = () => exportCSV(S.parts.findIndex(p => p.part === S.sel));
+}
 </script>
 </body>
 </html>
