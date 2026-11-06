@@ -465,5 +465,161 @@ function afterRender() {
   const cb = document.getElementById('csvBtn'); if (cb) cb.onclick = () => exportCSV(S.parts.findIndex(p => p.part === S.sel));
 }
 </script>
+<script>
+/* ===================== STAGE 3 — GL Flex issues / goods in / variance ===================== */
+const GL_POS = { TransactionType: 0, PostingDate: 1, TransactionNumber: 2, CCDesc: 12, UOM: 17, TransactionQty: 18, TransactionValue: 19,
+  Plant: 20, Store: 21, Part: 22, PartDesc: 23, FleetNumber: 26, PO: 27, BIN: 29, Originator: 30, WorkOrder: 31 };
+const GI_DEFAULT = ['R', 'GR', 'GRN', 'REC', 'RCPT', 'P', 'PO'];
+S.typeMap = {}; S.plantFilter = '__all';
+
+function parseGL(rows, source) {
+  let h = 0;
+  while (h < Math.min(rows.length, 10) && !(rows[h] || []).some(c => String(c ?? '').trim().toLowerCase() === 'transactiontype')) h++;
+  if (h >= Math.min(rows.length, 10)) h = 0;
+  const head = (rows[h] || []).map(c => String(c ?? '').trim().toLowerCase());
+  const col = {};
+  for (const [k, pos] of Object.entries(GL_POS)) { const i = head.indexOf(k.toLowerCase()); col[k] = i >= 0 ? i : pos; }
+  const tx = [];
+  for (let r = h + 1; r < rows.length; r++) {
+    const row = rows[r]; if (!row) continue;
+    const part = normPart(row[col.Part]), iso = toISO(row[col.PostingDate]), qty = num(row[col.TransactionQty]);
+    if (!part || !iso || qty == null) continue;
+    tx.push({ type: String(row[col.TransactionType] ?? '').trim().toUpperCase(), iso, qty: Math.abs(qty), part,
+      no: row[col.TransactionNumber], plant: String(row[col.Plant] ?? '').trim(), cc: row[col.CCDesc] ?? '',
+      fleet: row[col.FleetNumber] ?? '', wo: row[col.WorkOrder] ?? '', who: row[col.Originator] ?? '', po: row[col.PO] ?? '',
+      val: num(row[col.TransactionValue]) });
+  }
+  S.gl = tx; S.glSource = source;
+  [...new Set(tx.map(t => t.type))].forEach(t => {
+    if (!(t in S.typeMap)) S.typeMap[t] = t === 'I' ? 'issue' : GI_DEFAULT.includes(t) ? 'gi' : 'ignore';
+  });
+  const ds = tx.map(t => t.iso).sort();
+  const st = document.getElementById('glStatus');
+  st.textContent = tx.length ? `✔ ${tx.length} GL lines (${dLabel(ds[0])} – ${dLabel(ds[ds.length - 1])}) from ${source}` : `✖ no GL lines found in ${source}`;
+}
+
+function deriveGL() {
+  if (!S.gl || !S.gl.length) { S.glMap = null; S.parts.forEach(p => p.nVar = 0); return; }
+  S.glMap = true;
+  const ours = new Set(S.parts.map(p => p.part));
+  const byPart = {};
+  S.gl.forEach(t => {
+    if (!ours.has(t.part)) return;
+    if (S.plantFilter !== '__all' && t.plant !== S.plantFilter) return;
+    const m = S.typeMap[t.type]; if (m !== 'issue' && m !== 'gi') return;
+    (byPart[t.part] ||= []).push(t);
+  });
+  S.parts.forEach((p, k) => {
+    const n = S.dates.length;
+    p.iss = Array(n).fill(null); p.gi = Array(n).fill(null); p.vr = Array(n).fill(null); p.varFlag = Array(n).fill(null);
+    p.tx = (byPart[p.part] || []).slice().sort((a, b) => a.iso < b.iso ? 1 : -1);
+    p.pending = { iss: 0, gi: 0 };
+    const rec = []; S.dips[k].forEach((v, i) => v != null && rec.push(i));
+    const sums = {}; // dip index -> {iss, gi}
+    p.tx.forEach(t => {
+      // period = (previous recorded dip, this recorded dip]
+      let lo = 0, hi = rec.length - 1, j = -1;
+      while (lo <= hi) { const m = (lo + hi) >> 1; if (S.dates[rec[m]] >= t.iso) { j = m; hi = m - 1; } else lo = m + 1; }
+      t.period = null;
+      if (j === -1) { p.pending[S.typeMap[t.type] === 'issue' ? 'iss' : 'gi'] += t.qty; return; }  // after last dip
+      if (j === 0) return;                                                                         // before first dip
+      const i = rec[j]; t.period = i;
+      const s = sums[i] ||= { iss: 0, gi: 0 };
+      if (S.typeMap[t.type] === 'issue') s.iss += t.qty; else s.gi += t.qty;
+    });
+    p.totIss = 0; p.totGI = 0; p.totVar = 0; p.nVar = 0;
+    rec.forEach(i => {
+      if (p.change[i] == null) return;
+      const s = sums[i] || { iss: 0, gi: 0 };
+      p.iss[i] = s.iss; p.gi[i] = s.gi;
+      p.vr[i] = p.change[i] - (s.gi - s.iss);
+      p.varFlag[i] = p.vr[i] <= -p.tol ? 'loss' : p.vr[i] >= p.tol ? 'gain' : null;
+      if (p.varFlag[i]) p.nVar++;
+      p.totIss += s.iss; p.totGI += s.gi; p.totVar += p.vr[i];
+    });
+  });
+}
+
+function glSetupHTML() {
+  if (!S.gl) return `<div class="panel"><h2>GL Flex <span class="sub">Load the depot's GL Flex export (or paste it into the tracker's GL Flex sheet) to compare dips with booked issues &amp; goods in.</span></h2></div>`;
+  const types = Object.keys(S.typeMap).sort();
+  const counts = {}; S.gl.forEach(t => counts[t.type] = (counts[t.type] || 0) + 1);
+  const plants = [...new Set(S.gl.map(t => t.plant).filter(Boolean))].sort();
+  const ourLines = S.parts.reduce((a, p) => a + (p.tx ? p.tx.length : 0), 0);
+  return `<div class="panel"><h2>GL Flex mapping <span class="sub">${esc(S.glSource)} · ${S.gl.length} lines, ${ourLines} for tracked parts</span></h2>
+    <div style="display:flex;gap:24px;flex-wrap:wrap;align-items:flex-start">
+      <div><div class="muted" style="margin-bottom:6px">TransactionType meaning</div>
+      ${types.map(t => `<div style="display:flex;gap:8px;align-items:center;margin-bottom:4px">
+        <span class="badge-navy" style="min-width:34px;text-align:center">${esc(t || '(blank)')}</span>
+        <select data-type="${esc(t)}" style="font-size:12px;padding:3px">
+          ${[['issue', 'Issue (stock out)'], ['gi', 'Goods in (stock in)'], ['ignore', 'Ignore']].map(([v, l]) =>
+            `<option value="${v}" ${S.typeMap[t] === v ? 'selected' : ''}>${l}</option>`).join('')}
+        </select><span class="muted">${counts[t] || 0} lines</span></div>`).join('')}</div>
+      ${plants.length > 1 ? `<div><div class="muted" style="margin-bottom:6px">Plant filter</div>
+        <select id="plantSel" style="font-size:12px;padding:3px"><option value="__all">All plants</option>
+        ${plants.map(pl => `<option ${S.plantFilter === pl ? 'selected' : ''}>${esc(pl)}</option>`).join('')}</select></div>` : ''}
+      <div class="muted" style="max-width:420px;line-height:1.5">Each dip is compared with GL lines posted after the previous recorded dip up to and including the dip day
+        (Monday picks up the weekend). <b>Variance = dip change − (goods in − issues)</b>. Negative means more product went than was booked out.</div>
+    </div></div>`;
+}
+
+function varianceEventsHTML() {
+  if (!S.glMap) return '';
+  const ev = [];
+  S.parts.forEach((p, k) => p.varFlag.forEach((f, i) => f && ev.push({ p, k, i, f })));
+  ev.sort((a, b) => a.i === b.i ? a.p.vr[a.i] - b.p.vr[b.i] : b.i - a.i);
+  return `<div class="panel"><h2>Unexplained movements <span class="sub">dip change not matched by GL Flex beyond each part's tolerance</span></h2>
+    ${ev.length ? `<div class="table-wrap"><table class="wo-table"><thead><tr><th>Date</th><th>Part</th><th>Description</th>
+      <th class="num">Dip change</th><th class="num">Issues</th><th class="num">Goods in</th><th class="num">Variance</th><th>Likely cause</th></tr></thead><tbody>
+      ${ev.slice(0, 60).map(({ p, i, f }) => `<tr class="clickable ${f === 'loss' ? 'row-red' : 'row-amber'}" data-goto="${esc(p.part)}">
+        <td>${dLong(S.dates[i])}</td><td><span class="badge-navy">${esc(p.part)}</span></td><td>${esc(p.desc)}</td>
+        <td class="num">${fmt(p.change[i], true)}</td><td class="num">${fmt(p.iss[i])}</td><td class="num">${fmt(p.gi[i])}</td>
+        <td class="num ${f === 'loss' ? 't-red' : ''}">${fmt(p.vr[i], true)}</td>
+        <td>${f === 'loss' ? 'Unbooked issue / leak / loss' : (p.change[i] > 0 && !p.gi[i]) ? 'Delivery not receipted' : 'Over-booked issue / dip error'}</td></tr>`).join('')}
+      </tbody></table></div>` : '<div class="muted">✔ All dip movements reconcile with GL Flex within tolerance.</div>'}
+  </div>`;
+}
+
+function glTxHTML(k) {
+  const p = S.parts[k];
+  if (!S.glMap) return '';
+  const pend = p.pending.iss || p.pending.gi ? `<span class="sub">Awaiting next dip: issues ${fmt(p.pending.iss)}, goods in ${fmt(p.pending.gi)}</span>` : '';
+  const bad = new Set(p.varFlag.map((f, i) => f ? i : null).filter(i => i != null));
+  return `<div class="panel"><h2>GL Flex lines for ${esc(p.part)} ${pend}</h2>
+    ${p.tx.length ? `<div class="table-wrap"><table class="wo-table"><thead><tr><th>Posted</th><th>Type</th><th class="num">Qty</th><th>Counted in dip</th>
+      <th>Work order</th><th>Fleet</th><th>Originator</th><th>PO</th><th>Txn no.</th></tr></thead><tbody>
+      ${p.tx.slice(0, 200).map(t => `<tr class="${t.period != null && bad.has(t.period) ? 'row-amber' : ''}">
+        <td>${dLong(t.iso)}</td><td>${S.typeMap[t.type] === 'issue' ? `<span class="badge-red">${esc(t.type)} Issue</span>` : `<span class="badge-green">${esc(t.type)} Goods in</span>`}</td>
+        <td class="num">${fmt(t.qty)}</td><td class="muted">${t.period != null ? dLabel(S.dates[t.period]) : 'pending / before first dip'}</td>
+        <td>${esc(t.wo)}</td><td>${esc(t.fleet)}</td><td>${esc(t.who)}</td><td>${esc(t.po)}</td><td class="muted">${esc(t.no)}</td></tr>`).join('')}
+      </tbody></table></div>${p.tx.length > 200 ? `<div class="muted" style="margin-top:6px">Showing latest 200 of ${p.tx.length}.</div>` : ''}`
+      : '<div class="muted">No issues or goods in booked against this part in the loaded GL Flex.</div>'}
+  </div>`;
+}
+
+// extend stage 1/2 views
+const _overviewHTML = overviewHTML;
+overviewHTML = () => _overviewHTML() + varianceEventsHTML() + glSetupHTML();
+const _partHTML = partHTML;
+partHTML = k => _partHTML(k) + glTxHTML(k);
+const _afterRender = afterRender;
+afterRender = () => {
+  _afterRender();
+  document.querySelectorAll('select[data-type]').forEach(s => s.onchange = () => { S.typeMap[s.dataset.type] = s.value; derive(); render(); });
+  const ps = document.getElementById('plantSel'); if (ps) ps.onchange = () => { S.plantFilter = ps.value; derive(); render(); };
+};
+
+document.getElementById('glFile').addEventListener('change', async e => {
+  const f = e.target.files[0]; if (!f) return;
+  try {
+    const wb = await readWorkbook(f);
+    const name = wb.SheetNames.find(n => rowsOf(wb.Sheets[n]).slice(0, 10).some(r => (r || []).some(c => String(c ?? '').trim().toLowerCase() === 'transactiontype')))
+      || wb.SheetNames[0];
+    parseGL(rowsOf(wb.Sheets[name]), f.name); S.glExternal = true;
+    if (S.parts.length) { derive(); render(); }
+  } catch (err) { document.getElementById('glStatus').textContent = '✖ ' + err.message; alert(err.message); }
+  e.target.value = '';
+});
+</script>
 </body>
 </html>
